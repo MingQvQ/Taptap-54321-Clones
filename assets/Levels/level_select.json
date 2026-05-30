@@ -1,32 +1,25 @@
 {
-    "description": "关卡选择界面布局 - 蛇形路径，支持20关",
+    "description": "关卡选择界面布局 - 锯齿蛇形路径(上右下右...),13关",
     "grid": {
-        "rows": 3,
-        "cols": 8,
+        "rows": 4,
+        "cols": 5,
         "nodeSize": 48,
         "gap": 16
     },
     "path": [
-        { "row": 1, "col": 1, "comment": "关卡1" },
-        { "row": 1, "col": 2, "comment": "关卡2" },
-        { "row": 1, "col": 3, "comment": "关卡3" },
-        { "row": 1, "col": 4, "comment": "关卡4" },
-        { "row": 1, "col": 5, "comment": "关卡5" },
-        { "row": 2, "col": 5, "comment": "关卡6: 右边下来" },
-        { "row": 2, "col": 4, "comment": "关卡7" },
-        { "row": 2, "col": 3, "comment": "关卡8" },
-        { "row": 2, "col": 2, "comment": "关卡9" },
-        { "row": 2, "col": 1, "comment": "关卡10" },
-        { "row": 3, "col": 1, "comment": "关卡11: 左边下来" },
-        { "row": 3, "col": 2, "comment": "关卡12" },
-        { "row": 3, "col": 3, "comment": "关卡13" },
-        { "row": 3, "col": 4, "comment": "关卡14" },
-        { "row": 3, "col": 5, "comment": "关卡15" },
-        { "row": 1, "col": 6, "comment": "关卡16: 上去开始第二段" },
-        { "row": 1, "col": 7, "comment": "关卡17" },
-        { "row": 2, "col": 6, "comment": "关卡18: 下来第二段" },
-        { "row": 2, "col": 7, "comment": "关卡19" },
-        { "row": 2, "col": 8, "comment": "关卡20" }
+        { "row": 2, "col": 1, "comment": "关卡1: 起点" },
+        { "row": 1, "col": 1, "comment": "关卡2: 上" },
+        { "row": 1, "col": 2, "comment": "关卡3: 右" },
+        { "row": 2, "col": 2, "comment": "关卡4: 下" },
+        { "row": 2, "col": 3, "comment": "关卡5: 右" },
+        { "row": 1, "col": 3, "comment": "关卡6: 上" },
+        { "row": 1, "col": 4, "comment": "关卡7: 右" },
+        { "row": 2, "col": 4, "comment": "关卡8: 下" },
+        { "row": 2, "col": 5, "comment": "关卡9: 右" },
+        { "row": 3, "col": 5, "comment": "关卡10: 下" },
+        { "row": 4, "col": 5, "comment": "关卡11: 下" },
+        { "row": 4, "col": 4, "comment": "关卡12: 左" },
+        { "row": 4, "col": 3, "comment": "关卡13: 左" }
     ],
     "style": {
         "unlocked": {

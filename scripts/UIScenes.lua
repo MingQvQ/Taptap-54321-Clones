@@ -201,26 +201,19 @@ end
 
 -- 默认路径配置（蛇形：左→右，下，右→左，下，左→右）
 local DEFAULT_LEVEL_POSITIONS = {
-    { row = 1, col = 1 },  -- 关卡1
-    { row = 1, col = 2 },  -- 关卡2
-    { row = 1, col = 3 },  -- 关卡3
-    { row = 1, col = 4 },  -- 关卡4
-    { row = 1, col = 5 },  -- 关卡5
-    { row = 2, col = 5 },  -- 关卡6: 右边下来
-    { row = 2, col = 4 },  -- 关卡7
-    { row = 2, col = 3 },  -- 关卡8
-    { row = 2, col = 2 },  -- 关卡9
-    { row = 2, col = 1 },  -- 关卡10
-    { row = 3, col = 1 },  -- 关卡11: 左边下来
-    { row = 3, col = 2 },  -- 关卡12
-    { row = 3, col = 3 },  -- 关卡13
-    { row = 3, col = 4 },  -- 关卡14
-    { row = 3, col = 5 },  -- 关卡15
-    { row = 1, col = 6 },  -- 关卡16: 上去开始第二段
-    { row = 1, col = 7 },  -- 关卡17
-    { row = 2, col = 6 },  -- 关卡18: 下来第二段
-    { row = 2, col = 7 },  -- 关卡19
-    { row = 2, col = 8 },  -- 关卡20
+    { row = 2, col = 1 },  -- 关卡1: 起点
+    { row = 1, col = 1 },  -- 关卡2: 上
+    { row = 1, col = 2 },  -- 关卡3: 右
+    { row = 2, col = 2 },  -- 关卡4: 下
+    { row = 2, col = 3 },  -- 关卡5: 右
+    { row = 1, col = 3 },  -- 关卡6: 上
+    { row = 1, col = 4 },  -- 关卡7: 右
+    { row = 2, col = 4 },  -- 关卡8: 下
+    { row = 2, col = 5 },  -- 关卡9: 右
+    { row = 3, col = 5 },  -- 关卡10: 下
+    { row = 4, col = 5 },  -- 关卡11: 下
+    { row = 4, col = 4 },  -- 关卡12: 左
+    { row = 4, col = 3 },  -- 关卡13: 左
 }
 
 -- 默认样式
@@ -359,8 +352,8 @@ function LevelSelectScene.Enter(params)
 
     -- 加载 JSON 配置
     local config = LoadLevelSelectConfig()
-    local gridRows = 3
-    local gridCols = 8
+    local gridRows = 4
+    local gridCols = 5
     local nodeSize = 48
     local gapSize = 16
     local levelPositions = DEFAULT_LEVEL_POSITIONS
