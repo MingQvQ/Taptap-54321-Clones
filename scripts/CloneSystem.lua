@@ -24,7 +24,7 @@ function CloneSystem.Create(scene, spawnX, spawnY)
 
     -- 计时器状态
     self.timerProgress = 0        -- 0~1 环形进度
-    self.currentNumber = 5        -- 当前显示数字（5->4->3->2->1->0）
+    self.currentNumber = Config.CloneCount  -- 当前显示数字（N->...->1->0）
     self.spawnCount = 0           -- 已生成角色数量（0=还没生成玩家）
     self.isActive = true          -- 计时器是否激活
 

@@ -14,11 +14,11 @@ local IMG_FLAGS = 2 + 32  -- NVG_IMAGE_REPEATX(2) + NVG_IMAGE_NEAREST(32)
 -- yAnchor: 垂直锚点（0.0=图片顶部对齐屏幕顶，1.0=图片底部对齐屏幕底）
 local DEFAULT_LAYERS = {
     { name = "sky",          file = "image/tilemap/background/sky.png",          scrollSpeed = 0,  yAnchor = 0.0, fill = true },
-    { name = "clouds_small", file = "image/tilemap/background/clouds_small.png", scrollSpeed = 6,  yAnchor = 0.0, yOffset = -18 },
-    { name = "clouds_tiny",  file = "image/tilemap/background/clouds_tiny.png",  scrollSpeed = 8,  yAnchor = 0.0, yOffset = -18 },
-    { name = "clouds_big",   file = "image/tilemap/background/clouds_big.png",   scrollSpeed = 12, yAnchor = 0.0, yOffset = -18 },
-    { name = "desert",       file = "image/tilemap/background/desert.png",       scrollSpeed = 0,  yAnchor = 0.85, scaleMul = 1.10 },
-    { name = "beach",        file = "image/tilemap/background/beach.png",        scrollSpeed = 0,  yAnchor = 0.85, scaleMul = 1.10 },
+    { name = "clouds_small", file = "image/tilemap/background/clouds_small.png", scrollSpeed = 6,  yAnchor = 0.0, yOffsetRatio = -0.12 },
+    { name = "clouds_tiny",  file = "image/tilemap/background/clouds_tiny.png",  scrollSpeed = 8,  yAnchor = 0.0, yOffsetRatio = -0.08 },
+    { name = "clouds_big",   file = "image/tilemap/background/clouds_big.png",   scrollSpeed = 12, yAnchor = 0.0, yOffsetRatio = -0.15 },
+    { name = "desert",       file = "image/tilemap/background/desert.png",       scrollSpeed = 0,  yAnchor = 0.92, scaleMul = 1.20 },
+    { name = "beach",        file = "image/tilemap/background/beach.png",        scrollSpeed = 0,  yAnchor = 0.92, scaleMul = 1.20 },
 }
 
 --- 创建背景实例
@@ -46,6 +46,7 @@ function ParallaxBackground.Create(nvgContext, config, zoom)
                 scrollSpeed = cfg.scrollSpeed or 0,
                 yAnchor = cfg.yAnchor or 0.0,
                 yOffset = cfg.yOffset or 0,
+                yOffsetRatio = cfg.yOffsetRatio or 0,
                 fill = cfg.fill or false,
                 scaleMul = cfg.scaleMul or 1.0,
                 offset = 0,
@@ -104,8 +105,10 @@ function ParallaxBackground:Draw(screenW, screenH)
         local tileW = layer.imgW * layerScale
         local tileH = layer.imgH * layerScale
 
-        -- 垂直定位：yAnchor=0 顶部对齐，yAnchor=1 底部对齐，yOffset 像素偏移（负=上移）
-        local drawY = (screenH - tileH) * layer.yAnchor + layer.yOffset
+        -- 垂直定位：yAnchor=0 顶部对齐，yAnchor=1 底部对齐
+        -- yOffsetRatio: 相对屏幕高度的偏移（-0.1 = 上移10%屏幕高度）
+        -- yOffset: 固定像素偏移（兼容旧配置）
+        local drawY = (screenH - tileH) * layer.yAnchor + layer.yOffset + layer.yOffsetRatio * screenH
 
         -- 水平滚动偏移
         local ox = 0

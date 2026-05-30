@@ -8,6 +8,7 @@
 local UI = require("urhox-libs/UI")
 local TilemapData = require("LevelEditor.TilemapData")
 local TilemapRenderer = require("LevelEditor.TilemapRenderer")
+local EditorTestBridge = require("LevelEditor.EditorTestBridge")
 local SceneManager = require("SceneManager")
 
 local LevelEditorUI = {}
@@ -19,6 +20,16 @@ local LevelEditorUI = {}
 local nvg_ = nil
 local layout_ = nil
 local isDrawing_ = false
+
+--- 弹窗关闭后的冷却计时器（防止点击弹窗按钮后误放瓦片）
+local uiCooldownTimer_ = 0
+local UI_COOLDOWN_DURATION = 0.4  -- 冷却时间（秒）
+
+--- 脏标记：追踪是否有未保存的改动
+local dirty_ = false
+
+--- 退出确认弹窗
+local exitConfirmOverlay_ = nil
 
 --- 当前选中的画笔值（单个瓦片，向后兼容）
 local currentBrushId_ = 1
@@ -36,7 +47,10 @@ local currentTool_ = "paint"
 --- 调色板网格的列数（每行显示多少个瓦片）
 local PALETTE_COLS = 9
 
---- 所有已加载的瓦片 ID 列表（按注册顺序排列）
+--- 瓦片集列表：{ { name, folder, tileIds = {}, collapsed = false }, ... }
+local paletteTileSets_ = {}
+
+--- 所有已加载的瓦片 ID 列表（按注册顺序排列，兼容旧逻辑）
 local paletteTileIds_ = {}
 
 --- 多瓦片选区：{ startRow, startCol, endRow, endCol } 在调色板网格中的位置
@@ -51,7 +65,7 @@ local brushMatrixCols_ = 0
 
 --- 整理模式：用于交换瓦片位置
 local arrangeMode_ = false
-local arrangeSourceIndex_ = nil  -- paletteTileIds_ 中的索引
+local arrangeSourceIndex_ = nil  -- { setIdx, localIdx } 或 nil
 
 -- UI 引用
 local selectedLabel_ = nil
@@ -85,46 +99,57 @@ local PROTECTED_PREFAB_IDS = { [1] = true, [2] = true }
 -- 自动扫描并加载所有瓦片图片到注册表
 -- ============================================================================
 
---- 扫描 tilemap_tiles 目录并自动注册所有瓦片
+--- 瓦片集显示名映射（group 名 → 友好中文名）
+local TILESET_DISPLAY_NAMES = {
+    tilemap_tiles = "通用瓦片",
+    softy_sand = "沙地",
+}
+
+--- 从 tileRegistry 的 group 字段构建瓦片集分组
 local function AutoLoadTileAssets()
-    -- ScanDir 需要文件系统路径（带 assets/ 前缀）
-    local fsDir = "assets/image/tilemap/tilemap_tiles/"
-    -- 资源路径（不带 assets/ 前缀，用于 cache/UI）
-    local resDir = "image/tilemap/tilemap_tiles/"
-    local pngFiles = fileSystem:ScanDir(fsDir, "*.png", SCAN_FILES, false)
+    paletteTileSets_ = {}
 
-    -- 按文件名排序（按数字顺序）
-    table.sort(pngFiles, function(a, b)
-        local numA = tonumber(string.match(a, "(%d+)")) or 0
-        local numB = tonumber(string.match(b, "(%d+)")) or 0
-        return numA < numB
-    end)
+    -- 按 group 分组收集已注册瓦片
+    local groupMap = {}   -- group -> { tileIds }
+    local groupOrder = {} -- 保持发现顺序
 
-    for _, fname in ipairs(pngFiles) do
-        -- 跳过 .meta 文件
-        if not string.match(fname, "%.meta$") then
-            local path = resDir .. fname  -- 使用资源路径
-            local name = string.match(fname, "([^/]+)%.[^.]+$") or fname
-            -- 检查是否已注册（避免重复）
-            local alreadyRegistered = false
-            for id, info in pairs(TilemapData.tileRegistry) do
-                if info.image == path then
-                    alreadyRegistered = true
-                    break
-                end
+    for id = 1, TilemapData.nextTileId - 1 do
+        local info = TilemapData.tileRegistry[id]
+        if info and info.group then
+            local g = info.group
+            if not groupMap[g] then
+                groupMap[g] = {}
+                table.insert(groupOrder, g)
             end
-            if not alreadyRegistered then
-                TilemapData.RegisterTile(name, path, { 200, 200, 200, 255 })
-            end
+            table.insert(groupMap[g], id)
         end
+    end
+
+    -- 构建瓦片集列表
+    for _, folder in ipairs(groupOrder) do
+        local displayName = TILESET_DISPLAY_NAMES[folder] or folder
+        table.insert(paletteTileSets_, {
+            name = displayName,
+            folder = folder,
+            tileIds = groupMap[folder],
+            collapsed = false,
+        })
     end
 end
 
---- 刷新调色板瓦片列表（收集所有已注册的瓦片 ID）
+--- 刷新调色板瓦片列表（从瓦片集构建扁平列表，兼容旧逻辑）
 local function RefreshPaletteTileIds()
     paletteTileIds_ = {}
+    for _, tileSet in ipairs(paletteTileSets_) do
+        for _, id in ipairs(tileSet.tileIds) do
+            table.insert(paletteTileIds_, id)
+        end
+    end
+    -- 补充不在任何分组中的瓦片（手动添加的）
+    local inSet = {}
+    for _, id in ipairs(paletteTileIds_) do inSet[id] = true end
     for id = 1, TilemapData.nextTileId - 1 do
-        if TilemapData.tileRegistry[id] then
+        if TilemapData.tileRegistry[id] and not inSet[id] then
             table.insert(paletteTileIds_, id)
         end
     end
@@ -235,12 +260,36 @@ UpdateToolButtons = function()
 end
 
 -- ============================================================================
--- 文件操作
+-- 文件操作（使用 clientCloud 持久化 + File 作为会话缓存）
 -- ============================================================================
 
 local SAVE_DIR = "LevelEditor"
+local CLOUD_PREFIX = "lvled_"
+local CLOUD_INDEX_KEY = "lvled_index"
+
+--- 云端保存索引（文件名列表），编辑器初始化时从 cloud 加载
+local saveIndex_ = {}
+local cloudIndexLoaded_ = false
+
+--- 从云端加载保存索引（编辑器初始化时调用）
+local function LoadCloudIndex()
+    clientCloud:Get(CLOUD_INDEX_KEY, {
+        ok = function(values, iscores)
+            if values[CLOUD_INDEX_KEY] then
+                saveIndex_ = values[CLOUD_INDEX_KEY]
+            end
+            cloudIndexLoaded_ = true
+            print("[LevelEditor] Cloud index loaded, " .. #saveIndex_ .. " saves")
+        end,
+        error = function(code, reason)
+            cloudIndexLoaded_ = true
+            print("[LevelEditor] Cloud index load error: " .. tostring(reason))
+        end
+    })
+end
 
 local function SaveToFile(filename)
+    -- 1. 本地 File 缓存（同一会话内即时可用）
     fileSystem:CreateDir(SAVE_DIR)
     local path = SAVE_DIR .. "/" .. filename .. ".json"
     local data = TilemapData.Serialize()
@@ -249,36 +298,96 @@ local function SaveToFile(filename)
     if file:IsOpen() then
         file:WriteString(json)
         file:Close()
-        log:Write(LOG_INFO, "[LevelEditor] Saved: " .. path)
-    else
-        log:Write(LOG_ERROR, "[LevelEditor] Failed to save: " .. path)
     end
+
+    -- 2. 持久化到云端（跨刷新保留）
+    local cloudKey = CLOUD_PREFIX .. filename
+    clientCloud:Set(cloudKey, data, {
+        ok = function()
+            print("[LevelEditor] Cloud saved: " .. cloudKey)
+        end,
+        error = function(code, reason)
+            print("[LevelEditor] Cloud save error: " .. tostring(reason))
+        end
+    })
+
+    -- 3. 更新索引（去重后写入云端）
+    local found = false
+    for _, name in ipairs(saveIndex_) do
+        if name == filename then found = true; break end
+    end
+    if not found then
+        table.insert(saveIndex_, filename)
+        clientCloud:Set(CLOUD_INDEX_KEY, saveIndex_, {
+            ok = function() end,
+            error = function() end
+        })
+    end
+
+    dirty_ = false
+    print("[LevelEditor] Saved: " .. filename)
 end
 
 local function LoadFromFile(filename)
-    local path = SAVE_DIR .. "/" .. filename
-    if not fileSystem:FileExists(path) then
-        log:Write(LOG_WARNING, "[LevelEditor] No save file: " .. path)
-        return false
+    -- 优先尝试本地 File 缓存（速度快，同一会话内）
+    local localName = filename
+    if not string.find(localName, "%.json$") then
+        localName = localName .. ".json"
     end
-    local file = File(path, FILE_READ)
-    if not file:IsOpen() then return false end
-    local content = file:ReadString()
-    file:Close()
-    local ok, data = pcall(cjson.decode, content)
-    if not ok then
-        log:Write(LOG_ERROR, "[LevelEditor] JSON error: " .. tostring(data))
-        return false
+    local path = SAVE_DIR .. "/" .. localName
+    if fileSystem:FileExists(path) then
+        local file = File(path, FILE_READ)
+        if file:IsOpen() then
+            local content = file:ReadString()
+            file:Close()
+            local ok, data = pcall(cjson.decode, content)
+            if ok then
+                TilemapData.Deserialize(data)
+                TilemapRenderer.ClearImageCache()
+                currentBrushId_ = 1
+                dirty_ = false
+                UpdateSizeLabel()
+                UpdateSelectedLabel()
+                RebuildLayerList()
+                RebuildPalette()
+                print("[LevelEditor] Loaded from local: " .. filename)
+                return true
+            end
+        end
     end
-    TilemapData.Deserialize(data)
-    TilemapRenderer.ClearImageCache()
-    currentBrushId_ = 1
-    UpdateSizeLabel()
-    UpdateSelectedLabel()
-    RebuildLayerList()
-    RebuildPalette()
-    log:Write(LOG_INFO, "[LevelEditor] Loaded: " .. path)
-    return true
+
+    -- 本地没有，从云端加载
+    local cloudKey = CLOUD_PREFIX .. filename:gsub("%.json$", "")
+    clientCloud:Get(cloudKey, {
+        ok = function(values, iscores)
+            local data = values[cloudKey]
+            if data then
+                TilemapData.Deserialize(data)
+                TilemapRenderer.ClearImageCache()
+                currentBrushId_ = 1
+                dirty_ = false
+                UpdateSizeLabel()
+                UpdateSelectedLabel()
+                RebuildLayerList()
+                RebuildPalette()
+                print("[LevelEditor] Loaded from cloud: " .. cloudKey)
+
+                -- 缓存到本地 File（后续同会话内快速加载）
+                fileSystem:CreateDir(SAVE_DIR)
+                local cacheFile = File(path, FILE_WRITE)
+                if cacheFile:IsOpen() then
+                    cacheFile:WriteString(cjson.encode(data))
+                    cacheFile:Close()
+                end
+            else
+                print("[LevelEditor] Cloud key not found: " .. cloudKey)
+            end
+        end,
+        error = function(code, reason)
+            print("[LevelEditor] Cloud load error: " .. tostring(reason))
+        end
+    })
+    return true  -- 异步加载中
 end
 
 -- 弹框：保存
@@ -287,6 +396,7 @@ local function ShowSaveDialog()
 end
 local function HideSaveDialog()
     if saveOverlay_ then saveOverlay_:SetVisible(false) end
+    uiCooldownTimer_ = UI_COOLDOWN_DURATION
 end
 
 -- 弹框：加载（扫描目录并列举文件）
@@ -299,16 +409,37 @@ local function ShowLoadDialog()
 end
 local function HideLoadDialog()
     if loadOverlay_ then loadOverlay_:SetVisible(false) end
+    uiCooldownTimer_ = UI_COOLDOWN_DURATION
 end
 
 RebuildLoadList = function()
     if not loadListPanel_ then return end
     loadListPanel_:ClearChildren()
 
+    -- 合并云端索引和本地文件列表（去重）
+    local allNames = {}
+    local nameSet = {}
+
+    -- 优先显示云端索引（持久化数据）
+    for _, name in ipairs(saveIndex_) do
+        if not nameSet[name] then
+            nameSet[name] = true
+            table.insert(allNames, name)
+        end
+    end
+
+    -- 补充本地文件（同会话保存但云端还没同步的）
     fileSystem:CreateDir(SAVE_DIR)
     local files = fileSystem:ScanDir(SAVE_DIR .. "/", "*.json", SCAN_FILES, false)
+    for _, fname in ipairs(files) do
+        local baseName = fname:gsub("%.json$", "")
+        if not nameSet[baseName] then
+            nameSet[baseName] = true
+            table.insert(allNames, baseName)
+        end
+    end
 
-    if #files == 0 then
+    if #allNames == 0 then
         loadListPanel_:AddChild(UI.Label {
             text = "暂无存档文件",
             fontSize = 12, fontColor = { 150, 160, 180, 180 },
@@ -316,8 +447,8 @@ RebuildLoadList = function()
         return
     end
 
-    for _, fname in ipairs(files) do
-        local filename = fname
+    for _, name in ipairs(allNames) do
+        local filename = name
         loadListPanel_:AddChild(UI.Panel {
             width = "100%", height = 36,
             flexDirection = "row",
@@ -331,7 +462,7 @@ RebuildLoadList = function()
             end,
             children = {
                 UI.Label {
-                    text = "📄 " .. filename,
+                    text = "📄 " .. filename .. ".json",
                     fontSize = 12, fontColor = { 255, 255, 255, 230 },
                 },
             },
@@ -378,6 +509,7 @@ local function HideAssetPicker()
     if assetPickerOverlay_ then
         assetPickerOverlay_:SetVisible(false)
     end
+    uiCooldownTimer_ = UI_COOLDOWN_DURATION
 end
 
 RebuildAssetList = function()
@@ -450,31 +582,55 @@ local function HideConfirmDialog()
     if confirmOverlay_ then
         confirmOverlay_:SetVisible(false)
     end
+    uiCooldownTimer_ = UI_COOLDOWN_DURATION
 end
 
 -- ============================================================================
 -- 场景生命周期
 -- ============================================================================
 
-function LevelEditorUI.Enter(params)
-    TilemapData.New(16, 12)
+-- 预设网格尺寸配置（对应相机 orthoSize 自适应）
+local GRID_PRESETS = {
+    { label = "24×13", w = 24, h = 13, desc = "标准(推荐)" },
+    { label = "20×11", w = 20, h = 11, desc = "宽屏" },
+    { label = "16×9",  w = 16, h = 9,  desc = "紧凑" },
+    { label = "12×7",  w = 12, h = 7,  desc = "迷你" },
+}
+local currentPresetIndex_ = 1  -- 默认 24×13
 
-    -- 自动加载所有瓦片素材
+function LevelEditorUI.Enter(params)
+    local fromTest = params and params.fromTest
+
+    -- 初始化云端保存索引（仅首次加载）
+    if not cloudIndexLoaded_ then
+        LoadCloudIndex()
+    end
+
+    if not fromTest then
+        -- 全新进入编辑器：重置地图数据
+        TilemapData.New(GRID_PRESETS[1].w, GRID_PRESETS[1].h)
+        dirty_ = false
+    end
+    -- 从测试模式返回：保留 TilemapData 现有数据，不重置
+
+    -- 从注册表构建瓦片集分组
     AutoLoadTileAssets()
     RefreshPaletteTileIds()
 
     nvg_ = nvgCreate(1)
     nvgCreateFont(nvg_, "sans", "Fonts/MiSans-Regular.ttf")
 
-    currentBrushId_ = 1
-    currentTab_ = "tile"
-    currentTool_ = "paint"
-    paletteSelection_ = nil
-    brushMatrix_ = nil
-    brushMatrixRows_ = 0
-    brushMatrixCols_ = 0
-    arrangeMode_ = false
-    arrangeSourceIndex_ = nil
+    if not fromTest then
+        currentBrushId_ = 1
+        currentTab_ = "tile"
+        currentTool_ = "paint"
+        paletteSelection_ = nil
+        brushMatrix_ = nil
+        brushMatrixRows_ = 0
+        brushMatrixCols_ = 0
+        arrangeMode_ = false
+        arrangeSourceIndex_ = nil
+    end
 
     LevelEditorUI.BuildUI()
 
@@ -524,9 +680,8 @@ RebuildPalette = function()
     local children = {}
 
     if currentTab_ == "tile" then
-        -- 瓦片网格调色板
+        -- 瓦片网格调色板（按瓦片集分组）
         RefreshPaletteTileIds()
-        local totalRows = GetPaletteRows()
         local CELL_SIZE = 22  -- 每个格子的像素大小
 
         -- 提示文字
@@ -538,69 +693,194 @@ RebuildPalette = function()
             marginBottom = 2,
         })
 
-        -- 构建网格行
-        for row = 1, totalRows do
-            local rowChildren = {}
-            for col = 1, PALETTE_COLS do
-                local tileId = GetPaletteTileAt(row, col)
-                local cellRow = row
-                local cellCol = col
-                local cellIndex = (row - 1) * PALETTE_COLS + col
+        -- 按瓦片集分组显示
+        for setIdx, tileSet in ipairs(paletteTileSets_) do
+            local setFolder = tileSet.folder
+            local isCollapsed = tileSet.collapsed
 
-                -- 判断是否选中
-                local isSelected = false
-                if paletteSelection_ then
-                    isSelected = (row == paletteSelection_.startRow and col == paletteSelection_.startCol)
-                end
-                -- 判断是否为整理模式中的源瓦片
-                local isArrangeSource = (arrangeMode_ and arrangeSourceIndex_ == cellIndex)
+            -- 分组标题栏（可折叠）
+            local capturedSetIdx = setIdx
+            table.insert(children, UI.Panel {
+                width = "100%", height = 20,
+                flexDirection = "row",
+                alignItems = "center",
+                paddingLeft = 4, paddingRight = 4,
+                backgroundColor = { 40, 45, 60, 200 },
+                borderRadius = 3,
+                marginTop = (setIdx > 1) and 4 or 0,
+                onClick = function(self)
+                    paletteTileSets_[capturedSetIdx].collapsed = not paletteTileSets_[capturedSetIdx].collapsed
+                    RebuildPalette()
+                end,
+                children = {
+                    UI.Label {
+                        text = isCollapsed and "▶" or "▼",
+                        fontSize = 8,
+                        fontColor = { 180, 190, 210, 200 },
+                    },
+                    UI.Label {
+                        text = " " .. tileSet.name .. " (" .. #tileSet.tileIds .. ")",
+                        fontSize = 9,
+                        fontColor = { 200, 210, 230, 220 },
+                    },
+                },
+            })
 
-                if tileId > 0 then
-                    local info = TilemapData.tileRegistry[tileId]
-                    local bgProps = {}
-                    if info and info.image then
-                        bgProps.backgroundImage = info.image
-                        bgProps.backgroundFit = "cover"
-                    else
-                        bgProps.backgroundColor = info and { info.color[1], info.color[2], info.color[3], 220 } or { 80, 80, 80, 200 }
-                    end
+            -- 如果未折叠，显示该组的瓦片网格
+            if not isCollapsed then
+                local setTileIds = tileSet.tileIds
+                local setRows = math.ceil(#setTileIds / PALETTE_COLS)
 
-                    bgProps.width = CELL_SIZE
-                    bgProps.height = CELL_SIZE
-                    bgProps.borderRadius = 2
+                for row = 1, setRows do
+                    local rowChildren = {}
+                    for col = 1, PALETTE_COLS do
+                        local localIndex = (row - 1) * PALETTE_COLS + col
+                        local tileId = setTileIds[localIndex] or 0
 
-                    -- 高亮逻辑
-                    if isArrangeSource then
-                        bgProps.borderWidth = 2
-                        bgProps.borderColor = { 255, 200, 50, 255 }
-                    elseif isSelected and not arrangeMode_ then
-                        bgProps.borderWidth = 2
-                        bgProps.borderColor = { 100, 200, 255, 255 }
-                    else
-                        bgProps.borderWidth = 0
-                    end
-
-                    bgProps.onClick = function(self)
-                        if arrangeMode_ then
-                            -- 整理模式：交换瓦片位置
-                            if arrangeSourceIndex_ == nil then
-                                -- 选中第一个（源）
-                                arrangeSourceIndex_ = cellIndex
-                                RebuildPalette()
+                        if tileId > 0 then
+                            local info = TilemapData.tileRegistry[tileId]
+                            local bgProps = {}
+                            if info and info.image then
+                                bgProps.backgroundImage = info.image
+                                bgProps.backgroundFit = "cover"
                             else
-                                -- 选中第二个（目标），执行交换
-                                local srcIdx = arrangeSourceIndex_
-                                local dstIdx = cellIndex
-                                if srcIdx ~= dstIdx and srcIdx <= #paletteTileIds_ and dstIdx <= #paletteTileIds_ then
-                                    paletteTileIds_[srcIdx], paletteTileIds_[dstIdx] = paletteTileIds_[dstIdx], paletteTileIds_[srcIdx]
-                                end
-                                arrangeSourceIndex_ = nil
-                                RebuildPalette()
+                                bgProps.backgroundColor = info and { info.color[1], info.color[2], info.color[3], 220 } or { 80, 80, 80, 200 }
                             end
+
+                            bgProps.width = CELL_SIZE
+                            bgProps.height = CELL_SIZE
+                            bgProps.borderRadius = 2
+
+                            -- 高亮逻辑：当前选中
+                            local isSelected = (currentBrushId_ == tileId and currentTool_ == "paint" and not arrangeMode_)
+                            -- 整理模式中的源瓦片
+                            local isArrangeSource = (arrangeMode_ and arrangeSourceIndex_ ~= nil
+                                and arrangeSourceIndex_.setIdx == setIdx and arrangeSourceIndex_.localIdx == localIndex)
+
+                            if isArrangeSource then
+                                bgProps.borderWidth = 2
+                                bgProps.borderColor = { 255, 200, 50, 255 }
+                            elseif isSelected then
+                                bgProps.borderWidth = 2
+                                bgProps.borderColor = { 100, 200, 255, 255 }
+                            else
+                                bgProps.borderWidth = 0
+                            end
+
+                            -- 捕获闭包变量
+                            local capturedTileId = tileId
+                            local capturedLocalIndex = localIndex
+                            bgProps.onClick = function(self)
+                                if arrangeMode_ then
+                                    if arrangeSourceIndex_ == nil then
+                                        arrangeSourceIndex_ = { setIdx = capturedSetIdx, localIdx = capturedLocalIndex }
+                                        RebuildPalette()
+                                    else
+                                        -- 交换：仅在同一组内交换
+                                        local src = arrangeSourceIndex_
+                                        if src.setIdx == capturedSetIdx then
+                                            local srcLocalIdx = src.localIdx
+                                            local dstLocalIdx = capturedLocalIndex
+                                            if srcLocalIdx ~= dstLocalIdx
+                                                and srcLocalIdx <= #paletteTileSets_[capturedSetIdx].tileIds
+                                                and dstLocalIdx <= #paletteTileSets_[capturedSetIdx].tileIds then
+                                                local ids = paletteTileSets_[capturedSetIdx].tileIds
+                                                ids[srcLocalIdx], ids[dstLocalIdx] = ids[dstLocalIdx], ids[srcLocalIdx]
+                                            end
+                                        end
+                                        arrangeSourceIndex_ = nil
+                                        RebuildPalette()
+                                    end
+                                else
+                                    -- 普通模式：选择瓦片
+                                    currentBrushId_ = capturedTileId
+                                    brushMatrix_ = nil
+                                    brushMatrixRows_ = 0
+                                    brushMatrixCols_ = 0
+                                    currentTool_ = "paint"
+                                    UpdateToolButtons()
+                                    UpdateSelectedLabel()
+                                    RebuildPalette()
+                                end
+                            end
+
+                            table.insert(rowChildren, UI.Panel(bgProps))
                         else
-                            -- 普通模式：选择瓦片用于绘制
-                            paletteSelection_ = { startRow = cellRow, startCol = cellCol, endRow = cellRow, endCol = cellCol }
-                            currentBrushId_ = tileId
+                            -- 空格占位
+                            table.insert(rowChildren, UI.Panel {
+                                width = CELL_SIZE, height = CELL_SIZE,
+                                backgroundColor = { 25, 28, 40, 100 },
+                                borderRadius = 2,
+                            })
+                        end
+                    end
+
+                    table.insert(children, UI.Panel {
+                        flexDirection = "row",
+                        gap = 1,
+                        children = rowChildren,
+                    })
+                end
+            end
+        end
+
+        -- 手动添加的瓦片（不属于任何分组）
+        local ungroupedIds = {}
+        local inSet = {}
+        for _, ts in ipairs(paletteTileSets_) do
+            for _, id in ipairs(ts.tileIds) do inSet[id] = true end
+        end
+        for id = 1, TilemapData.nextTileId - 1 do
+            if TilemapData.tileRegistry[id] and not inSet[id] then
+                table.insert(ungroupedIds, id)
+            end
+        end
+
+        if #ungroupedIds > 0 then
+            table.insert(children, UI.Panel {
+                width = "100%", height = 20,
+                flexDirection = "row",
+                alignItems = "center",
+                paddingLeft = 4,
+                backgroundColor = { 40, 45, 60, 200 },
+                borderRadius = 3,
+                marginTop = 4,
+                children = {
+                    UI.Label {
+                        text = "▼ 自定义 (" .. #ungroupedIds .. ")",
+                        fontSize = 9,
+                        fontColor = { 200, 210, 230, 220 },
+                    },
+                },
+            })
+            local ungroupedRows = math.ceil(#ungroupedIds / PALETTE_COLS)
+            for row = 1, ungroupedRows do
+                local rowChildren = {}
+                for col = 1, PALETTE_COLS do
+                    local localIndex = (row - 1) * PALETTE_COLS + col
+                    local tileId = ungroupedIds[localIndex] or 0
+                    if tileId > 0 then
+                        local info = TilemapData.tileRegistry[tileId]
+                        local bgProps = {}
+                        if info and info.image then
+                            bgProps.backgroundImage = info.image
+                            bgProps.backgroundFit = "cover"
+                        else
+                            bgProps.backgroundColor = info and { info.color[1], info.color[2], info.color[3], 220 } or { 80, 80, 80, 200 }
+                        end
+                        bgProps.width = CELL_SIZE
+                        bgProps.height = CELL_SIZE
+                        bgProps.borderRadius = 2
+                        local isSelected = (currentBrushId_ == tileId and currentTool_ == "paint" and not arrangeMode_)
+                        if isSelected then
+                            bgProps.borderWidth = 2
+                            bgProps.borderColor = { 100, 200, 255, 255 }
+                        else
+                            bgProps.borderWidth = 0
+                        end
+                        local capturedTileId = tileId
+                        bgProps.onClick = function(self)
+                            currentBrushId_ = capturedTileId
                             brushMatrix_ = nil
                             brushMatrixRows_ = 0
                             brushMatrixCols_ = 0
@@ -609,40 +889,24 @@ RebuildPalette = function()
                             UpdateSelectedLabel()
                             RebuildPalette()
                         end
+                        table.insert(rowChildren, UI.Panel(bgProps))
+                    else
+                        table.insert(rowChildren, UI.Panel {
+                            width = CELL_SIZE, height = CELL_SIZE,
+                            backgroundColor = { 25, 28, 40, 100 },
+                            borderRadius = 2,
+                        })
                     end
-
-                    table.insert(rowChildren, UI.Panel(bgProps))
-                else
-                    -- 空格（也可以作为交换目标）
-                    table.insert(rowChildren, UI.Panel {
-                        width = CELL_SIZE, height = CELL_SIZE,
-                        backgroundColor = { 25, 28, 40, 100 },
-                        borderRadius = 2,
-                    })
                 end
+                table.insert(children, UI.Panel {
+                    flexDirection = "row",
+                    gap = 1,
+                    children = rowChildren,
+                })
             end
-
-            table.insert(children, UI.Panel {
-                flexDirection = "row",
-                gap = 1,
-                children = rowChildren,
-            })
         end
 
-        -- 添加瓦片按钮（打开素材选择器）
-        table.insert(children, UI.Panel {
-            width = "100%", height = 30,
-            justifyContent = "center", alignItems = "center",
-            backgroundColor = { 50, 100, 70, 150 },
-            borderRadius = 6,
-            marginTop = 8,
-            onClick = function(self)
-                ShowAssetPicker()
-            end,
-            children = {
-                UI.Label { text = "+ 添加更多瓦片", fontSize = 10, fontColor = { 255, 255, 255, 220 } },
-            },
-        })
+
 
     else
         -- 预制体列表（保持原有列表样式）
@@ -925,7 +1189,11 @@ function LevelEditorUI.BuildUI()
                 justifyContent = "center", alignItems = "center",
                 backgroundColor = { 60, 65, 80, 200 }, borderRadius = 4,
                 onClick = function(self)
-                    TilemapData.Resize(math.max(4, TilemapData.gridWidth - 2), math.max(4, TilemapData.gridHeight - 1))
+                    currentPresetIndex_ = currentPresetIndex_ - 1
+                    if currentPresetIndex_ < 1 then currentPresetIndex_ = #GRID_PRESETS end
+                    local preset = GRID_PRESETS[currentPresetIndex_]
+                    TilemapData.Resize(preset.w, preset.h)
+                    dirty_ = true
                     UpdateSizeLabel()
                 end,
                 children = { UI.Label { text = "−", fontSize = 14, fontColor = { 255, 255, 255, 220 } } },
@@ -936,7 +1204,11 @@ function LevelEditorUI.BuildUI()
                 justifyContent = "center", alignItems = "center",
                 backgroundColor = { 60, 65, 80, 200 }, borderRadius = 4,
                 onClick = function(self)
-                    TilemapData.Resize(math.min(40, TilemapData.gridWidth + 2), math.min(30, TilemapData.gridHeight + 1))
+                    currentPresetIndex_ = currentPresetIndex_ + 1
+                    if currentPresetIndex_ > #GRID_PRESETS then currentPresetIndex_ = 1 end
+                    local preset = GRID_PRESETS[currentPresetIndex_]
+                    TilemapData.Resize(preset.w, preset.h)
+                    dirty_ = true
                     UpdateSizeLabel()
                 end,
                 children = { UI.Label { text = "+", fontSize = 14, fontColor = { 255, 255, 255, 220 } } },
@@ -952,13 +1224,6 @@ function LevelEditorUI.BuildUI()
         backgroundColor = { 20, 22, 34, 240 },
         children = {
             UI.Label { text = "关卡编辑器", fontSize = 15, fontColor = { 180, 200, 240, 255 } },
-            UI.Panel {
-                flexDirection = "row", alignItems = "center", gap = 8,
-                children = {
-                    UI.Label { text = "当前:", fontSize = 12, fontColor = { 150, 160, 180, 200 } },
-                    selectedLabel_,
-                },
-            },
             sizeControls,
             UI.Label { text = "Ctrl+Z 撤销", fontSize = 10, fontColor = { 100, 110, 130, 150 } },
         },
@@ -973,6 +1238,13 @@ function LevelEditorUI.BuildUI()
         onClick = function(self)
             currentTab_ = "tile"
             currentBrushId_ = 1
+            -- 自动切换到第一个瓦片类型的图层
+            for i, layer in ipairs(TilemapData.layers) do
+                if layer.type == "tile" then
+                    TilemapData.SetActiveLayer(i)
+                    break
+                end
+            end
             tileModeBtn_:SetProp("backgroundColor", { 70, 130, 220, 255 })
             prefabModeBtn_:SetProp("backgroundColor", { 50, 55, 70, 200 })
             UpdateSelectedLabel()
@@ -988,6 +1260,13 @@ function LevelEditorUI.BuildUI()
         onClick = function(self)
             currentTab_ = "prefab"
             currentBrushId_ = 1
+            -- 自动切换到第一个预制体类型的图层
+            for i, layer in ipairs(TilemapData.layers) do
+                if layer.type == "prefab" then
+                    TilemapData.SetActiveLayer(i)
+                    break
+                end
+            end
             tileModeBtn_:SetProp("backgroundColor", { 50, 55, 70, 200 })
             prefabModeBtn_:SetProp("backgroundColor", { 70, 130, 220, 255 })
             UpdateSelectedLabel()
@@ -1132,11 +1411,22 @@ function LevelEditorUI.BuildUI()
             },
             UI.Button {
                 text = "↩ 撤销", variant = "outline", height = 34,
-                onClick = function(self) TilemapData.Undo() end,
+                onClick = function(self) TilemapData.Undo(); dirty_ = true end,
+            },
+            UI.Button {
+                text = "▶ 测试", variant = "primary", height = 34,
+                onClick = function(self) LevelEditorUI.LaunchTest() end,
             },
             UI.Button {
                 text = "← 返回", variant = "ghost", height = 34,
-                onClick = function(self) SceneManager.SwitchTo(SceneManager.SCENE_TITLE) end,
+                onClick = function(self)
+                    if dirty_ then
+                        -- 有未保存改动，弹窗确认
+                        if exitConfirmOverlay_ then exitConfirmOverlay_:SetVisible(true) end
+                    else
+                        SceneManager.SwitchTo(SceneManager.SCENE_TITLE)
+                    end
+                end,
             },
         },
     }
@@ -1179,6 +1469,7 @@ function LevelEditorUI.BuildUI()
                                 text = "确认清空", variant = "danger", height = 34,
                                 onClick = function(self)
                                     TilemapData.Clear()
+                                    dirty_ = true
                                     HideConfirmDialog()
                                 end,
                             },
@@ -1369,6 +1660,61 @@ function LevelEditorUI.BuildUI()
         },
     }
 
+    -- === 退出确认弹框 ===
+    exitConfirmOverlay_ = UI.Panel {
+        position = "absolute",
+        width = "100%", height = "100%",
+        justifyContent = "center", alignItems = "center",
+        backgroundColor = { 0, 0, 0, 160 },
+        visible = false,
+        onClick = function(self)
+            exitConfirmOverlay_:SetVisible(false)
+        end,
+        children = {
+            UI.Panel {
+                width = 300, height = 160,
+                justifyContent = "center", alignItems = "center",
+                gap = 16,
+                backgroundColor = { 35, 38, 55, 250 },
+                borderRadius = 12,
+                borderWidth = 1,
+                borderColor = { 80, 90, 120, 200 },
+                onClick = function(self) end,  -- 阻止穿透
+                children = {
+                    UI.Label {
+                        text = "当前有未保存的改动",
+                        fontSize = 14, fontWeight = "bold",
+                        fontColor = { 255, 220, 100, 240 },
+                    },
+                    UI.Label {
+                        text = "离开后未保存的内容将丢失",
+                        fontSize = 11, fontColor = { 180, 180, 200, 180 },
+                    },
+                    UI.Panel {
+                        flexDirection = "row", gap = 16,
+                        children = {
+                            UI.Button {
+                                text = "确定离开", variant = "danger", height = 34,
+                                onClick = function(self)
+                                    exitConfirmOverlay_:SetVisible(false)
+                                    uiCooldownTimer_ = UI_COOLDOWN_DURATION
+                                    SceneManager.SwitchTo(SceneManager.SCENE_TITLE)
+                                end,
+                            },
+                            UI.Button {
+                                text = "取消", variant = "outline", height = 34,
+                                onClick = function(self)
+                                    exitConfirmOverlay_:SetVisible(false)
+                                    uiCooldownTimer_ = UI_COOLDOWN_DURATION
+                                end,
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
     -- === 整体布局 ===
     local root = UI.Panel {
         width = "100%", height = "100%",
@@ -1388,6 +1734,7 @@ function LevelEditorUI.BuildUI()
             saveOverlay_,
             loadOverlay_,
             assetPickerOverlay_,
+            exitConfirmOverlay_,
         },
     }
 
@@ -1402,6 +1749,7 @@ end
 
 --- 使用多瓦片画笔绘制一个区域
 local function PaintWithBrush(anchorRow, anchorCol)
+    dirty_ = true
     if brushMatrix_ and (brushMatrixRows_ > 1 or brushMatrixCols_ > 1) then
         -- 多瓦片画笔：以 anchor 为左上角放置整个矩阵
         for dr = 1, brushMatrixRows_ do
@@ -1435,11 +1783,21 @@ function LevelEditor_HandleUpdate(eventType, eventData)
     -- 拖拽绘制/擦除（仅在地图区域内有效）
     if isDrawing_ and row >= 1 and row <= TilemapData.gridHeight
         and col >= 1 and col <= TilemapData.gridWidth then
+        dirty_ = true
         if currentTool_ == "erase" then
             TilemapData.Paint(row, col, 0)
         else
             PaintWithBrush(row, col)
         end
+    end
+
+    -- 更新错误提示计时器
+    local dt = eventData["TimeStep"]:GetFloat()
+    LevelEditorUI.UpdateErrorToast(dt)
+
+    -- 更新弹窗冷却计时器
+    if uiCooldownTimer_ > 0 then
+        uiCooldownTimer_ = uiCooldownTimer_ - dt
     end
 end
 
@@ -1495,6 +1853,27 @@ function LevelEditor_HandleRender(eventType, eventData)
         end
     end
 
+    -- 错误提示 Toast
+    local toastMsg, toastTimer = LevelEditorUI.GetErrorToast()
+    if toastTimer > 0 and toastMsg ~= "" then
+        local alpha = math.min(1.0, toastTimer / 0.5) * 255
+        local tw = 300
+        local th = 40
+        local tx = (logW - tw) / 2
+        local ty = logH * 0.3
+
+        nvgBeginPath(nvg_)
+        nvgRoundedRect(nvg_, tx, ty, tw, th, 8)
+        nvgFillColor(nvg_, nvgRGBA(200, 50, 50, math.floor(alpha * 0.9)))
+        nvgFill(nvg_)
+
+        nvgFontFace(nvg_, "sans")
+        nvgFontSize(nvg_, 14)
+        nvgTextAlign(nvg_, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+        nvgFillColor(nvg_, nvgRGBA(255, 255, 255, math.floor(alpha)))
+        nvgText(nvg_, tx + tw / 2, ty + th / 2, toastMsg)
+    end
+
     nvgEndFrame(nvg_)
 end
 
@@ -1503,6 +1882,9 @@ function LevelEditor_HandleMouseDown(eventType, eventData)
     local dpr = graphics:GetDPR()
     local mouseX = input.mousePosition.x / dpr
     local mouseY = input.mousePosition.y / dpr
+
+    -- 弹窗冷却期间不响应地图绘制
+    if uiCooldownTimer_ > 0 then return end
 
     -- 如果鼠标在 UI 面板区域（左侧/右侧/顶栏/底栏），不启动地图绘制
     local inMapArea = (mouseX >= UI_MARGINS.left and mouseX <= (graphics:GetWidth() / dpr - UI_MARGINS.right)
@@ -1513,6 +1895,7 @@ function LevelEditor_HandleMouseDown(eventType, eventData)
             isDrawing_ = true
             TilemapData.BeginBatch()
             local row, col = TilemapRenderer.ScreenToGrid(mouseX, mouseY, layout_)
+            dirty_ = true
             if currentTool_ == "erase" then
                 TilemapData.Paint(row, col, 0)
             else
@@ -1525,6 +1908,7 @@ function LevelEditor_HandleMouseDown(eventType, eventData)
             isDrawing_ = true
             TilemapData.BeginBatch()
             local row, col = TilemapRenderer.ScreenToGrid(mouseX, mouseY, layout_)
+            dirty_ = true
             TilemapData.Paint(row, col, 0)
         end
     end
@@ -1550,6 +1934,54 @@ function LevelEditor_HandleKeyDown(eventType, eventData)
     local key = eventData["Key"]:GetInt()
     if key == KEY_Z and input:GetQualifierDown(QUAL_CTRL) then
         TilemapData.Undo()
+        dirty_ = true
+    end
+end
+
+-- ============================================================================
+-- 测试按钮逻辑
+-- ============================================================================
+
+--- 显示错误提示（2秒后自动消失）
+local errorToastTimer_ = 0
+local errorToastMsg_ = ""
+
+--- 启动测试
+function LevelEditorUI.LaunchTest()
+    -- 验证地图
+    local valid, errMsg = EditorTestBridge.Validate()
+    if not valid then
+        errorToastMsg_ = errMsg
+        errorToastTimer_ = 2.5
+        print("[LevelEditor] Test validation failed: " .. errMsg)
+        return
+    end
+
+    -- 转换地图数据
+    local levelData = EditorTestBridge.ConvertToLevelData()
+    print("[LevelEditor] Launching test: " .. #levelData.platforms .. " platforms, "
+        .. #levelData.spikes .. " spikes, playerCount=" .. (levelData.playerCount or 5))
+
+    -- 切换到游戏场景（传递编辑器数据）
+    SceneManager.SwitchTo(SceneManager.SCENE_GAME, {
+        levelData = levelData,
+        fromEditor = true,
+    })
+end
+
+--- 获取错误提示信息（供渲染器绘制）
+function LevelEditorUI.GetErrorToast()
+    return errorToastMsg_, errorToastTimer_
+end
+
+--- 更新错误提示计时器
+function LevelEditorUI.UpdateErrorToast(dt)
+    if errorToastTimer_ > 0 then
+        errorToastTimer_ = errorToastTimer_ - dt
+        if errorToastTimer_ <= 0 then
+            errorToastTimer_ = 0
+            errorToastMsg_ = ""
+        end
     end
 end
 

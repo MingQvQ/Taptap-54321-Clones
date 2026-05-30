@@ -29,6 +29,15 @@ local spikes_ = {}
 local goalArea_ = nil
 local spawnPos_ = { x = 0, y = 0 }  -- 出生点坐标
 
+-- 瓦片纹理渲染数据（编辑器测试模式）
+local tileCells_ = {}         -- { x, y, size, image, color }[]
+local tileImages_ = {}        -- 已加载的纹理缓存 { [imagePath] = nvgImageHandle }
+local hasTileTextures_ = false  -- 是否使用纹理渲染（编辑器模式）
+
+-- 地图尺寸（物理单位，用于自适应相机）
+local mapGridW_ = 0   -- 网格列数（如 16）
+local mapGridH_ = 0   -- 网格行数（如 9）
+
 -- 游戏状态
 local STATE_PLAYING = "playing"
 local STATE_PAUSED = "paused"
@@ -37,6 +46,7 @@ local STATE_LOSE = "lose"
 local gameState_ = STATE_PLAYING
 local stateTimer_ = 0  -- 胜负后的延迟
 local pauseUI_ = nil   -- 暂停菜单 UI 根引用
+local hudUI_ = nil     -- 游戏 HUD（含暂停按钮）
 
 -- 渲染缓存
 local screenW_ = 0
@@ -66,11 +76,18 @@ local SPRITE_DRAW_SIZE = 48     -- 精灵绘制大小（像素）
 -- 工具函数
 -- ============================================================================
 
+--- 获取当前每物理单位对应的屏幕像素数（动态适配相机 orthoSize）
+local function GetPixelsPerUnit()
+    local camera = cameraNode_:GetComponent("Camera")
+    return screenH_ / camera.orthoSize
+end
+
 --- 物理坐标转屏幕坐标（考虑相机偏移）
 local function PhysicsToScreen(px, py)
     local camPos = cameraNode_.position2D
-    local sx = screenW_ / 2 + (px - camPos.x) * Config.PixelsPerUnit
-    local sy = screenH_ / 2 - (py - camPos.y) * Config.PixelsPerUnit
+    local ppu = GetPixelsPerUnit()
+    local sx = screenW_ / 2 + (px - camPos.x) * ppu
+    local sy = screenH_ / 2 - (py - camPos.y) * ppu
     return sx, sy
 end
 
@@ -157,8 +174,17 @@ end
 -- 场景生命周期
 -- ============================================================================
 
+--- 进入参数：
+--- params.level = number → 从 LevelData 加载关卡
+--- params.levelData = table → 直接使用传入的关卡数据（编辑器测试模式）
+--- params.fromEditor = true → 标记来自编辑器，胜负后返回编辑器
+local fromEditor_ = false
+local directLevelData_ = nil
+
 function GameScene.Enter(params)
     currentLevel_ = (params and params.level) or 1
+    fromEditor_ = (params and params.fromEditor) or false
+    directLevelData_ = (params and params.levelData) or nil
     gameState_ = STATE_PLAYING
     stateTimer_ = 0
 
@@ -169,8 +195,10 @@ function GameScene.Enter(params)
     nvg_ = nvgCreate(1)
     nvgCreateFont(nvg_, "sans", "Fonts/MiSans-Regular.ttf")
 
-    -- 创建背景（zoom=1.75 放大显示细节）
-    parallaxBg_ = ParallaxBackground.Create(nvg_, nil, 1.75)
+    -- 创建背景（缩放倍数 = 屏幕高度 / 源图高度，确保背景充满屏幕）
+    local initH = graphics:GetHeight() / graphics:GetDPR()
+    local bgZoom = math.max(2.0, initH / 180)
+    parallaxBg_ = ParallaxBackground.Create(nvg_, nil, bgZoom)
 
     -- 加载角色精灵帧
     GameScene.LoadSpriteFrames()
@@ -178,8 +206,12 @@ function GameScene.Enter(params)
     -- 创建场景
     GameScene.CreatePhysicsScene()
 
-    -- 加载关卡
-    GameScene.LoadLevel(currentLevel_)
+    -- 加载关卡（支持直接数据或索引）
+    if directLevelData_ then
+        GameScene.LoadLevelFromData(directLevelData_)
+    else
+        GameScene.LoadLevel(currentLevel_)
+    end
 
     -- 订阅事件
     SubscribeToEvent("Update", "GameScene_HandleUpdate")
@@ -188,12 +220,43 @@ function GameScene.Enter(params)
     SubscribeToEvent("PhysicsBeginContact2D", "GameScene_HandleContactBegin")
     SubscribeToEvent("PhysicsEndContact2D", "GameScene_HandleContactEnd")
 
-    print("[GameScene] Entered level " .. currentLevel_)
+    -- 创建 HUD（暂停按钮）
+    hudUI_ = UI.Panel {
+        width = "100%", height = "100%",
+        children = {
+            UI.Panel {
+                position = "absolute",
+                top = 8, right = 8,
+                children = {
+                    UI.Button {
+                        text = "⏸",
+                        width = 40, height = 40,
+                        fontSize = 18,
+                        borderRadius = 20,
+                        onClick = function(self)
+                            if gameState_ == STATE_PLAYING then
+                                GameScene.Pause()
+                            end
+                        end,
+                    },
+                },
+            },
+        },
+    }
+    UI.SetRoot(hudUI_)
+
+    if fromEditor_ then
+        print("[GameScene] Entered EDITOR TEST mode")
+    else
+        print("[GameScene] Entered level " .. currentLevel_)
+    end
 end
 
 function GameScene.Exit()
-    -- 清理暂停菜单
+    -- 清理暂停菜单和 HUD
     GameScene.HidePauseMenu()
+    hudUI_ = nil
+    UI.SetRoot(nil)
 
     -- 清理（CloneSystem.Destroy 会一并清理主玩家）
     if cloneSystem_ then
@@ -238,6 +301,11 @@ function GameScene.Exit()
     platforms_ = {}
     spikes_ = {}
     goalArea_ = nil
+    mapGridW_ = 0
+    mapGridH_ = 0
+    tileCells_ = {}
+    tileImages_ = {}
+    hasTileTextures_ = false
 end
 
 -- ============================================================================
@@ -267,15 +335,58 @@ end
 -- 关卡加载
 -- ============================================================================
 
+--- 从直接数据加载关卡（编辑器测试模式）
+---@param levelData table { spawn, goal, platforms, spikes, camera, playerCount }
+function GameScene.LoadLevelFromData(levelData)
+    -- 临时覆盖克隆数量（编辑器中可配置）
+    if levelData.playerCount then
+        Config.CloneCount = levelData.playerCount
+    end
+    GameScene.ApplyLevelData(levelData)
+end
+
 function GameScene.LoadLevel(levelIndex)
     local levelData = LevelData.GetLevel(levelIndex)
     if not levelData then
         print("[GameScene] ERROR: Level " .. levelIndex .. " not found!")
         return
     end
+    GameScene.ApplyLevelData(levelData)
+end
 
+--- 实际加载关卡数据到物理世界
+---@param levelData table
+function GameScene.ApplyLevelData(levelData)
     platforms_ = {}
     spikes_ = {}
+    tileCells_ = {}
+    tileImages_ = {}
+    hasTileTextures_ = false
+
+    -- 加载逐格瓦片纹理数据（编辑器测试模式）
+    if levelData.tiles and #levelData.tiles > 0 then
+        hasTileTextures_ = true
+        tileCells_ = levelData.tiles
+        -- 预加载所有用到的纹理（去重）
+        for _, cell in ipairs(tileCells_) do
+            if cell.image and not tileImages_[cell.image] then
+                local img = nvgCreateImage(nvg_, cell.image, 0)
+                if img > 0 then
+                    tileImages_[cell.image] = img
+                end
+            end
+        end
+        print("[GameScene] Loaded tile textures: " .. #tileCells_ .. " cells")
+    end
+
+    -- 保存地图尺寸并动态调整相机（Cover 策略：地图完全覆盖屏幕）
+    if levelData.gridHeight and levelData.gridWidth then
+        mapGridW_ = levelData.gridWidth
+        mapGridH_ = levelData.gridHeight
+        -- 初始设置（后续每帧在 Render 中根据实际屏幕比例动态调整）
+        local camera = cameraNode_:GetComponent("Camera")
+        camera.orthoSize = mapGridH_
+    end
 
     -- 创建平台
     for i, pData in ipairs(levelData.platforms) do
@@ -410,7 +521,10 @@ function GameScene_HandleUpdate(eventType, eventData)
         -- 胜负延迟
         stateTimer_ = stateTimer_ + dt
         if stateTimer_ > 2.5 then
-            if gameState_ == STATE_WIN then
+            if fromEditor_ then
+                -- 编辑器测试模式：胜负后都返回编辑器
+                SceneManager.SwitchTo(SceneManager.SCENE_EDITOR, { fromTest = true })
+            elseif gameState_ == STATE_WIN then
                 SceneManager.SwitchTo(SceneManager.SCENE_LEVEL_SELECT)
             else
                 -- 重试当前关卡
@@ -466,10 +580,15 @@ function GameScene.UpdatePlaying(dt)
 end
 
 function GameScene.CheckFallDeath()
+    -- 动态计算掉落死亡线：相机可视范围底部再往下 2 个单位（完全离开屏幕）
+    local camera = cameraNode_:GetComponent("Camera")
+    local camY = cameraNode_.position.y
+    local fallDeathY = camY - camera.orthoSize / 2 - 2.0
+
     -- 检查主玩家（可能尚未生成）
     if mainPlayer_ and mainPlayer_.isAlive then
         local pos = mainPlayer_:GetPosition()
-        if pos.y < Config.FallDeathY then
+        if pos.y < fallDeathY then
             mainPlayer_:Kill()
         end
     end
@@ -478,7 +597,7 @@ function GameScene.CheckFallDeath()
         for _, clone in ipairs(cloneSystem_:GetClones()) do
             if clone.isAlive then
                 local pos = clone:GetPosition()
-                if pos.y < Config.FallDeathY then
+                if pos.y < fallDeathY then
                     clone:Kill()
                 end
             end
@@ -596,6 +715,20 @@ function GameScene_HandleRender(eventType, eventData)
     screenW_ = graphics:GetWidth() / dpr
     screenH_ = graphics:GetHeight() / dpr
 
+    -- 动态调整相机 orthoSize（Cover 策略：地图完全覆盖屏幕，不露出地图外部）
+    if mapGridW_ > 0 and mapGridH_ > 0 then
+        local screenAspect = screenW_ / screenH_
+        local mapAspect = mapGridW_ / mapGridH_
+        local camera = cameraNode_:GetComponent("Camera")
+        if screenAspect > mapAspect then
+            -- 屏幕比地图更宽 → 用宽度适配（减小 orthoSize 以放大）
+            camera.orthoSize = mapGridW_ / screenAspect
+        else
+            -- 屏幕比地图更高或相等 → 用高度适配
+            camera.orthoSize = mapGridH_
+        end
+    end
+
     nvgBeginFrame(nvg_, screenW_, screenH_, dpr)
 
     GameScene.DrawBackground()
@@ -631,11 +764,43 @@ function GameScene.DrawBackground()
 end
 
 function GameScene.DrawPlatforms()
+    local ppu = GetPixelsPerUnit()
+
+    -- 如果有逐格瓦片纹理数据（编辑器测试模式），用纹理渲染
+    if hasTileTextures_ then
+        local pad = 0.5  -- 每边扩展0.5像素，消除浮点精度导致的缝隙
+        for _, cell in ipairs(tileCells_) do
+            local sx, sy = PhysicsToScreen(cell.x, cell.y)
+            local cellPx = cell.size * ppu
+
+            if cell.image and tileImages_[cell.image] then
+                -- 用纹理图案填充（稍微扩大消除缝隙）
+                local imgHandle = tileImages_[cell.image]
+                local paint = nvgImagePattern(nvg_,
+                    sx - cellPx / 2 - pad, sy - cellPx / 2 - pad,
+                    cellPx + pad * 2, cellPx + pad * 2, 0, imgHandle, 1.0)
+                nvgBeginPath(nvg_)
+                nvgRect(nvg_, sx - cellPx / 2 - pad, sy - cellPx / 2 - pad, cellPx + pad * 2, cellPx + pad * 2)
+                nvgFillPaint(nvg_, paint)
+                nvgFill(nvg_)
+            else
+                -- 无纹理，用后备颜色填充
+                local clr = cell.color or { 80, 180, 80, 255 }
+                nvgBeginPath(nvg_)
+                nvgRect(nvg_, sx - cellPx / 2 - pad, sy - cellPx / 2 - pad, cellPx + pad * 2, cellPx + pad * 2)
+                nvgFillColor(nvg_, nvgRGBA(clr[1], clr[2], clr[3], clr[4] or 255))
+                nvgFill(nvg_)
+            end
+        end
+        return
+    end
+
+    -- 非编辑器模式：使用合并矩形 + 渐变色渲染
     local c = Config.Colors.Platform
     for _, p in ipairs(platforms_) do
         local sx, sy = PhysicsToScreen(p.x, p.y)
-        local sw = p.width * Config.PixelsPerUnit
-        local sh = p.height * Config.PixelsPerUnit
+        local sw = p.width * ppu
+        local sh = p.height * ppu
 
         -- 平台主体
         nvgBeginPath(nvg_)
@@ -657,10 +822,11 @@ end
 
 function GameScene.DrawSpikes()
     local c = Config.Colors.Spike
+    local ppu = GetPixelsPerUnit()
     for _, s in ipairs(spikes_) do
         local sx, sy = PhysicsToScreen(s.x, s.y)
-        local sw = s.width * Config.PixelsPerUnit
-        local spikeH = 0.4 * Config.PixelsPerUnit
+        local sw = s.width * ppu
+        local spikeH = 0.4 * ppu
 
         -- 画三角形尖刺
         local numSpikes = math.floor(sw / 12)
@@ -683,9 +849,10 @@ end
 function GameScene.DrawGoal()
     if not goalArea_ then return end
     local c = Config.Colors.Goal
+    local ppu = GetPixelsPerUnit()
     local sx, sy = PhysicsToScreen(goalArea_.x, goalArea_.y)
-    local sw = goalArea_.width * Config.PixelsPerUnit
-    local sh = goalArea_.height * Config.PixelsPerUnit
+    local sw = goalArea_.width * ppu
+    local sh = goalArea_.height * ppu
 
     -- 闪烁效果
     local pulse = math.sin(os.clock() * 3) * 0.3 + 0.7
@@ -741,7 +908,8 @@ function GameScene.DrawSingleCharacter(player)
     if not imgHandle or imgHandle == 0 then return end
 
     -- 计算绘制区域（以角色物理中心为基准，精灵稍大于碰撞体）
-    local drawSize = SPRITE_DRAW_SIZE * (Config.PixelsPerUnit / 50)  -- 根据缩放比调整
+    local ppu = GetPixelsPerUnit()
+    local drawSize = SPRITE_DRAW_SIZE * (ppu / 50)  -- 根据缩放比调整
     local halfSize = drawSize / 2
 
     -- 判断朝向（根据水平速度翻转）
@@ -924,6 +1092,112 @@ end
 
 --- 显示暂停菜单
 function GameScene.ShowPauseMenu()
+    -- 构建按钮列表
+    local buttons = {}
+    buttons[#buttons + 1] = UI.Button {
+        text = "返回游戏",
+        variant = "primary",
+        width = "80%", maxWidth = 200,
+        height = 36,
+        onClick = function(self)
+            GameScene.Resume()
+        end,
+    }
+    buttons[#buttons + 1] = UI.Button {
+        text = "重置关卡",
+        variant = "outline",
+        width = "80%", maxWidth = 200,
+        height = 34,
+        onClick = function(self)
+            GameScene.HidePauseMenu()
+            GameScene.Exit()
+            GameScene.Enter({ level = currentLevel_ })
+        end,
+    }
+    if fromEditor_ then
+        buttons[#buttons + 1] = UI.Button {
+            text = "返回编辑器",
+            variant = "primary",
+            width = "80%", maxWidth = 200,
+            height = 34,
+            onClick = function(self)
+                GameScene.HidePauseMenu()
+                SceneManager.SwitchTo(SceneManager.SCENE_EDITOR, { fromTest = true })
+            end,
+        }
+    end
+    buttons[#buttons + 1] = UI.Button {
+        text = "返回主菜单",
+        variant = "outline",
+        width = "80%", maxWidth = 200,
+        height = 34,
+        onClick = function(self)
+            GameScene.HidePauseMenu()
+            SceneManager.SwitchTo(SceneManager.SCENE_TITLE)
+        end,
+    }
+
+    -- 音量区域
+    local volumePanel = UI.Panel {
+        width = "100%",
+        gap = 6,
+        padding = 10,
+        backgroundColor = { 25, 28, 40, 200 },
+        borderRadius = 8,
+        children = {
+            UI.Label {
+                text = "音效设置",
+                fontSize = 12,
+                fontColor = { 180, 190, 210, 220 },
+                marginBottom = 2,
+            },
+            UI.Panel {
+                width = "100%",
+                flexDirection = "row",
+                alignItems = "center",
+                gap = 6,
+                children = {
+                    UI.Label { text = "音乐", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
+                    UI.Slider {
+                        value = Config.Settings.MusicVolume * 100,
+                        min = 0, max = 100,
+                        flexGrow = 1,
+                        onChange = function(self, val) Config.Settings.MusicVolume = val / 100 end,
+                    },
+                }
+            },
+            UI.Panel {
+                width = "100%",
+                flexDirection = "row",
+                alignItems = "center",
+                gap = 6,
+                children = {
+                    UI.Label { text = "音效", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
+                    UI.Slider {
+                        value = Config.Settings.SFXVolume * 100,
+                        min = 0, max = 100,
+                        flexGrow = 1,
+                        onChange = function(self, val) Config.Settings.SFXVolume = val / 100 end,
+                    },
+                }
+            },
+        }
+    }
+
+    -- 合并 children: 标题 + 按钮[1] + 音量 + 按钮[2..n]
+    local panelChildren = {}
+    panelChildren[#panelChildren + 1] = UI.Label {
+        text = "暂停",
+        fontSize = 22,
+        fontColor = { 255, 255, 255, 255 },
+        marginBottom = 2,
+    }
+    panelChildren[#panelChildren + 1] = buttons[1]  -- 返回游戏
+    panelChildren[#panelChildren + 1] = volumePanel
+    for i = 2, #buttons do
+        panelChildren[#panelChildren + 1] = buttons[i]
+    end
+
     pauseUI_ = UI.Panel {
         width = "100%",
         height = "100%",
@@ -932,119 +1206,16 @@ function GameScene.ShowPauseMenu()
         backgroundColor = { 0, 0, 0, 150 },
         children = {
             UI.Panel {
-                width = "90%",
-                maxWidth = 360,
-                padding = 32,
-                gap = 16,
+                width = "85%",
+                maxWidth = 320,
+                padding = 16,
+                gap = 8,
                 alignItems = "center",
                 backgroundColor = { 35, 40, 58, 245 },
-                borderRadius = 16,
+                borderRadius = 14,
                 borderWidth = 2,
                 borderColor = { 80, 140, 255, 100 },
-                children = {
-                    -- 标题
-                    UI.Label {
-                        text = "暂停",
-                        fontSize = 28,
-                        fontColor = { 255, 255, 255, 255 },
-                        marginBottom = 8,
-                    },
-                    -- 返回游戏
-                    UI.Button {
-                        text = "返回游戏",
-                        variant = "primary",
-                        width = 200,
-                        height = 46,
-                        onClick = function(self)
-                            GameScene.Resume()
-                        end,
-                    },
-                    -- 音效设置
-                    UI.Panel {
-                        width = "100%",
-                        gap = 8,
-                        padding = 12,
-                        backgroundColor = { 25, 28, 40, 200 },
-                        borderRadius = 8,
-                        children = {
-                            UI.Label {
-                                text = "音效设置",
-                                fontSize = 14,
-                                fontColor = { 180, 190, 210, 220 },
-                                marginBottom = 4,
-                            },
-                            UI.Panel {
-                                width = "100%",
-                                flexDirection = "row",
-                                alignItems = "center",
-                                gap = 8,
-                                children = {
-                                    UI.Label {
-                                        text = "音乐",
-                                        fontSize = 12,
-                                        fontColor = { 160, 170, 190, 200 },
-                                        width = 36,
-                                    },
-                                    UI.Slider {
-                                        value = Config.Settings.MusicVolume * 100,
-                                        min = 0,
-                                        max = 100,
-                                        flexGrow = 1,
-                                        onChange = function(self, val)
-                                            Config.Settings.MusicVolume = val / 100
-                                        end,
-                                    },
-                                }
-                            },
-                            UI.Panel {
-                                width = "100%",
-                                flexDirection = "row",
-                                alignItems = "center",
-                                gap = 8,
-                                children = {
-                                    UI.Label {
-                                        text = "音效",
-                                        fontSize = 12,
-                                        fontColor = { 160, 170, 190, 200 },
-                                        width = 36,
-                                    },
-                                    UI.Slider {
-                                        value = Config.Settings.SFXVolume * 100,
-                                        min = 0,
-                                        max = 100,
-                                        flexGrow = 1,
-                                        onChange = function(self, val)
-                                            Config.Settings.SFXVolume = val / 100
-                                        end,
-                                    },
-                                }
-                            },
-                        }
-                    },
-                    -- 重置关卡
-                    UI.Button {
-                        text = "重置关卡",
-                        variant = "outline",
-                        width = 200,
-                        height = 44,
-                        onClick = function(self)
-                            GameScene.HidePauseMenu()
-                            GameScene.Exit()
-                            GameScene.Enter({ level = currentLevel_ })
-                        end,
-                    },
-                    -- 返回主菜单
-                    UI.Button {
-                        text = "返回主菜单",
-                        variant = "outline",
-                        width = 200,
-                        height = 44,
-                        onClick = function(self)
-                            GameScene.HidePauseMenu()
-                            SceneManager.SwitchTo(SceneManager.SCENE_TITLE)
-                        end,
-                    },
-                }
+                children = panelChildren,
             }
         }
     }
@@ -1053,7 +1224,7 @@ end
 
 --- 隐藏暂停菜单
 function GameScene.HidePauseMenu()
-    UI.SetRoot(nil)
+    UI.SetRoot(hudUI_)
     pauseUI_ = nil
 end
 

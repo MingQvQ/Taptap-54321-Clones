@@ -117,6 +117,35 @@ local function DrawTileLayer(vg, layer, layout)
     end
 end
 
+--- 渲染玩家出生点（圆圈 + 数字）
+local function DrawSpawnPoint(vg, cx, cy, cellSize, info)
+    local centerX = cx + cellSize * 0.5
+    local centerY = cy + cellSize * 0.5
+    local radius = (cellSize - 6) * 0.45
+    local c = info.color
+    local playerCount = info.playerCount or 5
+
+    -- 外圆填充
+    nvgBeginPath(vg)
+    nvgCircle(vg, centerX, centerY, radius)
+    nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.5)))
+    nvgFill(vg)
+
+    -- 外圆边框
+    nvgBeginPath(vg)
+    nvgCircle(vg, centerX, centerY, radius)
+    nvgStrokeColor(vg, nvgRGBA(c[1], c[2], c[3], 240))
+    nvgStrokeWidth(vg, 2.0)
+    nvgStroke(vg)
+
+    -- 中心数字（玩家数量）
+    nvgFontFace(vg, "sans")
+    nvgFontSize(vg, cellSize * 0.45)
+    nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+    nvgFillColor(vg, nvgRGBA(255, 255, 255, 255))
+    nvgText(vg, centerX, centerY, tostring(playerCount))
+end
+
 --- 渲染单个预制体类型图层
 local function DrawPrefabLayer(vg, layer, layout)
     local cellSize = layout.cellSize
@@ -132,26 +161,31 @@ local function DrawPrefabLayer(vg, layer, layout)
                 local cx = ox + (col - 1) * cellSize
                 local cy = oy + (row - 1) * cellSize
 
-                -- 半透明背景
-                local c = info.color
-                nvgBeginPath(vg)
-                nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
-                nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.6)))
-                nvgFill(vg)
+                -- 玩家出生点：特殊绘制（圆圈+数字）
+                if info.tag == "player_spawn" then
+                    DrawSpawnPoint(vg, cx, cy, cellSize, info)
+                else
+                    -- 半透明背景
+                    local c = info.color
+                    nvgBeginPath(vg)
+                    nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
+                    nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.6)))
+                    nvgFill(vg)
 
-                -- 边框
-                nvgBeginPath(vg)
-                nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
-                nvgStrokeColor(vg, nvgRGBA(c[1], c[2], c[3], 220))
-                nvgStrokeWidth(vg, 1.5)
-                nvgStroke(vg)
+                    -- 边框
+                    nvgBeginPath(vg)
+                    nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
+                    nvgStrokeColor(vg, nvgRGBA(c[1], c[2], c[3], 220))
+                    nvgStrokeWidth(vg, 1.5)
+                    nvgStroke(vg)
 
-                -- 图标
-                if info.icon and info.icon ~= "" then
-                    nvgFontSize(vg, cellSize * 0.55)
-                    nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
-                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 240))
-                    nvgText(vg, cx + cellSize * 0.5, cy + cellSize * 0.5, info.icon)
+                    -- 图标
+                    if info.icon and info.icon ~= "" then
+                        nvgFontSize(vg, cellSize * 0.55)
+                        nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+                        nvgFillColor(vg, nvgRGBA(255, 255, 255, 240))
+                        nvgText(vg, cx + cellSize * 0.5, cy + cellSize * 0.5, info.icon)
+                    end
                 end
             end
         end
