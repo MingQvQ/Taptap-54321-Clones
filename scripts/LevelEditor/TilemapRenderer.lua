@@ -1,7 +1,7 @@
 -- ============================================================================
--- TilemapRenderer.lua - 瓦片地图 NanoVG 渲染器（v2）
--- 支持自定义贴图渲染 + 预制体图标标记
--- 双层渲染：底层瓦片贴图 → 上层预制体标记
+-- TilemapRenderer.lua - 瓦片地图 NanoVG 渲染器（v3）
+-- 按 zOrder 升序渲染多个图层（数字越大越后绘制=覆盖前面的）
+-- 支持自定义贴图 + 预制体图标标记
 -- ============================================================================
 
 local TilemapData = require("LevelEditor.TilemapData")
@@ -21,17 +21,13 @@ TilemapRenderer.hoverBorderColor = { 255, 255, 255, 120 }
 TilemapRenderer.hoverRow = -1
 TilemapRenderer.hoverCol = -1
 
---- NanoVG 图片缓存: imagePath -> nvgImageHandle
+--- NanoVG 图片缓存
 local imageCache_ = {}
 
 -- ============================================================================
 -- 图片管理
 -- ============================================================================
 
---- 获取或加载 NanoVG 图片句柄
----@param vg userdata NanoVG 上下文
----@param imagePath string 贴图路径
----@return number|nil NanoVG 图片句柄
 local function GetOrLoadImage(vg, imagePath)
     if not imagePath or imagePath == "" then return nil end
     if imageCache_[imagePath] then
@@ -45,7 +41,6 @@ local function GetOrLoadImage(vg, imagePath)
     return nil
 end
 
---- 清除图片缓存（场景退出时调用）
 function TilemapRenderer.ClearImageCache()
     imageCache_ = {}
 end
@@ -54,11 +49,6 @@ end
 -- 布局计算
 -- ============================================================================
 
---- 计算渲染区域参数
----@param screenW number 屏幕逻辑宽度
----@param screenH number 屏幕逻辑高度
----@param margins table { top, bottom, left, right }
----@return table { offsetX, offsetY, cellSize, totalW, totalH }
 function TilemapRenderer.CalcLayout(screenW, screenH, margins)
     local m = margins or { top = 48, bottom = 52, left = 80, right = 12 }
     local availW = screenW - m.left - m.right
@@ -84,11 +74,6 @@ function TilemapRenderer.CalcLayout(screenW, screenH, margins)
     }
 end
 
---- 屏幕坐标 → 网格坐标
----@param sx number
----@param sy number
----@param layout table
----@return number row, number col
 function TilemapRenderer.ScreenToGrid(sx, sy, layout)
     local col = math.floor((sx - layout.offsetX) / layout.cellSize) + 1
     local row = math.floor((sy - layout.offsetY) / layout.cellSize) + 1
@@ -99,7 +84,81 @@ end
 -- 渲染
 -- ============================================================================
 
---- 绘制整个地图（NanoVGRender 回调中调用）
+--- 渲染单个瓦片类型图层
+local function DrawTileLayer(vg, layer, layout)
+    local cellSize = layout.cellSize
+    local ox = layout.offsetX
+    local oy = layout.offsetY
+
+    for row = 1, TilemapData.gridHeight do
+        for col = 1, TilemapData.gridWidth do
+            local tileId = layer.data[row][col]
+            if tileId ~= 0 then
+                local info = TilemapData.GetTileInfo(tileId)
+                local cx = ox + (col - 1) * cellSize
+                local cy = oy + (row - 1) * cellSize
+
+                local imgHandle = GetOrLoadImage(vg, info.image)
+                if imgHandle then
+                    local paint = nvgImagePattern(vg, cx, cy, cellSize, cellSize, 0, imgHandle, 1.0)
+                    nvgBeginPath(vg)
+                    nvgRect(vg, cx, cy, cellSize, cellSize)
+                    nvgFillPaint(vg, paint)
+                    nvgFill(vg)
+                else
+                    local c = info.color
+                    nvgBeginPath(vg)
+                    nvgRect(vg, cx + 1, cy + 1, cellSize - 2, cellSize - 2)
+                    nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], c[4]))
+                    nvgFill(vg)
+                end
+            end
+        end
+    end
+end
+
+--- 渲染单个预制体类型图层
+local function DrawPrefabLayer(vg, layer, layout)
+    local cellSize = layout.cellSize
+    local ox = layout.offsetX
+    local oy = layout.offsetY
+
+    nvgFontFace(vg, "sans")
+    for row = 1, TilemapData.gridHeight do
+        for col = 1, TilemapData.gridWidth do
+            local prefabId = layer.data[row][col]
+            if prefabId ~= 0 then
+                local info = TilemapData.GetPrefabInfo(prefabId)
+                local cx = ox + (col - 1) * cellSize
+                local cy = oy + (row - 1) * cellSize
+
+                -- 半透明背景
+                local c = info.color
+                nvgBeginPath(vg)
+                nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
+                nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.6)))
+                nvgFill(vg)
+
+                -- 边框
+                nvgBeginPath(vg)
+                nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
+                nvgStrokeColor(vg, nvgRGBA(c[1], c[2], c[3], 220))
+                nvgStrokeWidth(vg, 1.5)
+                nvgStroke(vg)
+
+                -- 图标
+                if info.icon and info.icon ~= "" then
+                    nvgFontSize(vg, cellSize * 0.55)
+                    nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 240))
+                    nvgText(vg, cx + cellSize * 0.5, cy + cellSize * 0.5, info.icon)
+                end
+            end
+        end
+    end
+end
+
+--- 绘制整个地图（按 zOrder 升序渲染所有可见图层）
 ---@param vg userdata NanoVG 上下文
 ---@param layout table CalcLayout 返回值
 function TilemapRenderer.Draw(vg, layout)
@@ -114,71 +173,20 @@ function TilemapRenderer.Draw(vg, layout)
     nvgFillColor(vg, nvgRGBA(bg[1], bg[2], bg[3], bg[4]))
     nvgFill(vg)
 
-    -- 2. 瓦片层
-    for row = 1, TilemapData.gridHeight do
-        for col = 1, TilemapData.gridWidth do
-            local tileId = TilemapData.tileLayer[row][col]
-            if tileId ~= 0 then
-                local info = TilemapData.GetTileInfo(tileId)
-                local cx = ox + (col - 1) * cellSize
-                local cy = oy + (row - 1) * cellSize
-
-                -- 尝试用贴图渲染
-                local imgHandle = GetOrLoadImage(vg, info.image)
-                if imgHandle then
-                    local paint = nvgImagePattern(vg, cx, cy, cellSize, cellSize, 0, imgHandle, 1.0)
-                    nvgBeginPath(vg)
-                    nvgRect(vg, cx, cy, cellSize, cellSize)
-                    nvgFillPaint(vg, paint)
-                    nvgFill(vg)
-                else
-                    -- fallback: 纯色矩形
-                    local c = info.color
-                    nvgBeginPath(vg)
-                    nvgRect(vg, cx + 1, cy + 1, cellSize - 2, cellSize - 2)
-                    nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], c[4]))
-                    nvgFill(vg)
-                end
+    -- 2. 按 zOrder 排序后依次渲染图层
+    local sortedIndices = TilemapData.GetLayersSortedByZOrder()
+    for _, layerIdx in ipairs(sortedIndices) do
+        local layer = TilemapData.layers[layerIdx]
+        if layer.visible then
+            if layer.type == "tile" then
+                DrawTileLayer(vg, layer, layout)
+            elseif layer.type == "prefab" then
+                DrawPrefabLayer(vg, layer, layout)
             end
         end
     end
 
-    -- 3. 预制体层（绘制在瓦片层之上）
-    nvgFontFace(vg, "sans")
-    for row = 1, TilemapData.gridHeight do
-        for col = 1, TilemapData.gridWidth do
-            local prefabId = TilemapData.prefabLayer[row][col]
-            if prefabId ~= 0 then
-                local info = TilemapData.GetPrefabInfo(prefabId)
-                local cx = ox + (col - 1) * cellSize
-                local cy = oy + (row - 1) * cellSize
-
-                -- 半透明背景标记
-                local c = info.color
-                nvgBeginPath(vg)
-                nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
-                nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.6)))
-                nvgFill(vg)
-
-                -- 边框
-                nvgBeginPath(vg)
-                nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
-                nvgStrokeColor(vg, nvgRGBA(c[1], c[2], c[3], 220))
-                nvgStrokeWidth(vg, 1.5)
-                nvgStroke(vg)
-
-                -- 图标文字
-                if info.icon and info.icon ~= "" then
-                    nvgFontSize(vg, cellSize * 0.55)
-                    nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
-                    nvgFillColor(vg, nvgRGBA(255, 255, 255, 240))
-                    nvgText(vg, cx + cellSize * 0.5, cy + cellSize * 0.5, info.icon)
-                end
-            end
-        end
-    end
-
-    -- 4. 网格线
+    -- 3. 网格线
     local gc = TilemapRenderer.gridLineColor
     nvgBeginPath(vg)
     nvgStrokeColor(vg, nvgRGBA(gc[1], gc[2], gc[3], gc[4]))
@@ -194,6 +202,10 @@ function TilemapRenderer.Draw(vg, layout)
         nvgLineTo(vg, ox + layout.totalW, y)
     end
     nvgStroke(vg)
+
+    -- 4. 活跃图层高亮边框（让用户知道当前编辑的是哪层）
+    -- 在悬停格子旁边显示小标记
+    -- (此处仅做悬停高亮)
 
     -- 5. 悬停高亮
     if TilemapRenderer.hoverRow >= 1 and TilemapRenderer.hoverRow <= TilemapData.gridHeight

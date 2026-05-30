@@ -10,6 +10,7 @@ local Config = require("Config")
 local SceneManager = require("SceneManager")
 local LevelData = require("LevelData")
 
+
 local UIScenes = {}
 
 -- ============================================================================
@@ -65,21 +66,68 @@ local TitleScene = {}
 
 ---@type NVGContextWrapper
 local titleNvg_ = nil
-local titleScrollOffset_ = 0
-local titleBgTexture_ = nil
-local titleBgW_ = 0
-local titleBgH_ = 0
+
+-- 3D 透视云朵系统
+local cloudImages_ = {}       -- NanoVG image handles (数组)
+local cloudImgSizes_ = {}     -- { {w,h}, ... } 每张图原始尺寸
+local cloudParticles_ = {}    -- 云朵粒子列表
+local CLOUD_COUNT = 18        -- 同屏云朵数
+local CLOUD_SPEED = 60        -- 基础前进速度（像素/秒）
+local CLOUD_Z_MIN = 0.1       -- 最远处 Z（最小缩放）
+local CLOUD_Z_MAX = 1.2       -- 最近处 Z（最大缩放）
+
+-- 天空渐变色
+local SKY_TOP = { 90, 160, 255 }
+local SKY_BOTTOM = { 200, 230, 255 }
+
+--- 生成/重置一个云朵粒子
+local function SpawnCloud(p, screenW, screenH, randomZ)
+    p.imgIdx = math.random(1, #cloudImages_)
+    if randomZ then
+        p.z = CLOUD_Z_MIN + math.random() * (CLOUD_Z_MAX - CLOUD_Z_MIN)
+    else
+        p.z = CLOUD_Z_MIN  -- 新生成的从最远处开始
+    end
+    -- 随机水平位置（基于屏幕宽度，考虑缩放后可能超出）
+    local spread = screenW * 0.8
+    p.x = (math.random() - 0.5) * spread
+    -- 垂直位置：远处的靠近地平线（中心偏上），近处的分散
+    p.y = (math.random() - 0.5) * screenH * 0.4 - screenH * 0.1
+    return p
+end
 
 function TitleScene.Enter(params)
-    -- 创建 NanoVG 上下文用于滚动背景
+    -- 创建 NanoVG 上下文
     titleNvg_ = nvgCreate(1)
-    titleScrollOffset_ = 0
 
-    -- 预加载天空背景纹理
-    local bgImg = nvgCreateImage(titleNvg_, "image/sky_bg_20260530074148.png", 0)
-    titleBgTexture_ = bgImg
-    -- 获取图片尺寸
-    titleBgW_, titleBgH_ = nvgImageSize(titleNvg_, bgImg)
+    -- 加载云朵精灵图（最近邻采样保持像素风格）
+    local IMG_FLAGS = 32  -- NVG_IMAGE_NEAREST
+    local cloudFiles = {
+        "image/cloud_sprite_1_20260530131000.png",
+        "image/cloud_sprite_2_20260530131006.png",
+        "image/cloud_sprite_3_20260530131019.png",
+    }
+    cloudImages_ = {}
+    cloudImgSizes_ = {}
+    for i, f in ipairs(cloudFiles) do
+        local img = nvgCreateImage(titleNvg_, f, IMG_FLAGS)
+        if img and img ~= 0 then
+            local w, h = nvgImageSize(titleNvg_, img)
+            table.insert(cloudImages_, img)
+            table.insert(cloudImgSizes_, { w = w, h = h })
+        end
+    end
+
+    -- 初始化云朵粒子（随机分布在不同深度）
+    local screenW = graphics:GetWidth() / graphics:GetDPR()
+    local screenH = graphics:GetHeight() / graphics:GetDPR()
+    cloudParticles_ = {}
+    math.randomseed(os.time())
+    for i = 1, CLOUD_COUNT do
+        local p = {}
+        SpawnCloud(p, screenW, screenH, true)  -- true = 随机Z深度
+        table.insert(cloudParticles_, p)
+    end
 
     -- 注册事件
     SubscribeToEvent("Update", "TitleScene_HandleUpdate")
@@ -219,11 +267,16 @@ function TitleScene.Exit()
     UnsubscribeFromEvent("Update")
     if titleNvg_ then
         UnsubscribeFromEvent(titleNvg_, "NanoVGRender")
+        for _, img in ipairs(cloudImages_) do
+            nvgDeleteImage(titleNvg_, img)
+        end
     end
+    cloudImages_ = {}
+    cloudImgSizes_ = {}
+    cloudParticles_ = {}
     ClearAllTweens()
     UI.SetRoot(nil)
     titleNvg_ = nil
-    titleBgTexture_ = nil
 end
 
 SceneManager.Register(SceneManager.SCENE_TITLE, TitleScene)
@@ -231,14 +284,29 @@ SceneManager.Register(SceneManager.SCENE_TITLE, TitleScene)
 -- Title 全局事件回调
 function TitleScene_HandleUpdate(eventType, eventData)
     local dt = eventData["TimeStep"]:GetFloat()
-    -- 背景从右向左滚动，速度约 30 像素/秒
-    titleScrollOffset_ = titleScrollOffset_ + dt * 30
+
+    local screenW = graphics:GetWidth() / graphics:GetDPR()
+    local screenH = graphics:GetHeight() / graphics:GetDPR()
+
+    -- 更新云朵粒子：Z 递增（从远到近）
+    for _, p in ipairs(cloudParticles_) do
+        -- Z 越大 = 越近，速度也越快（透视加速）
+        local speedMul = 0.3 + p.z * 0.7
+        p.z = p.z + CLOUD_SPEED * speedMul * dt * 0.01
+
+        -- 超过最大 Z（飞出屏幕）→ 重置到远处
+        if p.z > CLOUD_Z_MAX then
+            SpawnCloud(p, screenW, screenH, false)
+        end
+    end
+
     -- 驱动按钮 tween 动画
     UpdateTweens(dt)
 end
 
 function TitleScene_HandleRender(eventType, eventData)
-    if not titleNvg_ or not titleBgTexture_ then return end
+    if not titleNvg_ then return end
+    if #cloudImages_ == 0 then return end
 
     local screenW = graphics:GetWidth()
     local screenH = graphics:GetHeight()
@@ -248,33 +316,63 @@ function TitleScene_HandleRender(eventType, eventData)
 
     nvgBeginFrame(titleNvg_, logW, logH, dpr)
 
-    -- 计算背景绘制参数：保持纵横比覆盖全屏高度
-    local drawH = logH
-    local drawW = drawH * (titleBgW_ / titleBgH_)
-
-    -- 滚动偏移（循环）
-    local offset = titleScrollOffset_ % drawW
-
-    -- 绘制两份实现无缝循环
-    local paint1 = nvgImagePattern(titleNvg_, -offset, 0, drawW, drawH, 0, titleBgTexture_, 1.0)
+    -- 绘制天空渐变背景
+    local skyPaint = nvgLinearGradient(titleNvg_, 0, 0, 0, logH,
+        nvgRGBA(SKY_TOP[1], SKY_TOP[2], SKY_TOP[3], 255),
+        nvgRGBA(SKY_BOTTOM[1], SKY_BOTTOM[2], SKY_BOTTOM[3], 255))
     nvgBeginPath(titleNvg_)
-    nvgRect(titleNvg_, -offset, 0, drawW, drawH)
-    nvgFillPaint(titleNvg_, paint1)
+    nvgRect(titleNvg_, 0, 0, logW, logH)
+    nvgFillPaint(titleNvg_, skyPaint)
     nvgFill(titleNvg_)
 
-    local paint2 = nvgImagePattern(titleNvg_, -offset + drawW, 0, drawW, drawH, 0, titleBgTexture_, 1.0)
-    nvgBeginPath(titleNvg_)
-    nvgRect(titleNvg_, -offset + drawW, 0, drawW, drawH)
-    nvgFillPaint(titleNvg_, paint2)
-    nvgFill(titleNvg_)
+    -- 按 Z 排序（远的先画，近的后画）
+    local sorted = {}
+    for i, p in ipairs(cloudParticles_) do
+        sorted[i] = p
+    end
+    table.sort(sorted, function(a, b) return a.z < b.z end)
 
-    -- 如果还有空隙，绘制第三份
-    if -offset + drawW * 2 < logW then
-        local paint3 = nvgImagePattern(titleNvg_, -offset + drawW * 2, 0, drawW, drawH, 0, titleBgTexture_, 1.0)
-        nvgBeginPath(titleNvg_)
-        nvgRect(titleNvg_, -offset + drawW * 2, 0, drawW, drawH)
-        nvgFillPaint(titleNvg_, paint3)
-        nvgFill(titleNvg_)
+    -- 绘制每朵云
+    local cx = logW * 0.5  -- 屏幕中心（消失点）
+    local cy = logH * 0.45 -- 消失点略偏上
+
+    for _, p in ipairs(sorted) do
+        local imgIdx = p.imgIdx
+        if imgIdx and cloudImages_[imgIdx] then
+            local imgW = cloudImgSizes_[imgIdx].w
+            local imgH = cloudImgSizes_[imgIdx].h
+
+            -- 透视缩放：Z 越大（越近）显示越大
+            local scale = p.z * 1.5
+
+            -- 透视位移：从消失点向外扩散
+            local drawX = cx + p.x * p.z
+            local drawY = cy + p.y * p.z
+
+            -- 计算绘制尺寸
+            local dw = imgW * scale
+            local dh = imgH * scale
+
+            -- 透明度：远处淡，近处清晰
+            local alpha = math.min(1.0, p.z / CLOUD_Z_MAX * 1.2)
+            -- 超近处也渐隐（飞出屏幕效果）
+            if p.z > CLOUD_Z_MAX * 0.85 then
+                local fadeOut = (CLOUD_Z_MAX - p.z) / (CLOUD_Z_MAX * 0.15)
+                alpha = alpha * math.max(0, fadeOut)
+            end
+
+            -- 绘制云朵
+            nvgSave(titleNvg_)
+            nvgGlobalAlpha(titleNvg_, alpha)
+            local paint = nvgImagePattern(titleNvg_,
+                drawX - dw * 0.5, drawY - dh * 0.5,
+                dw, dh, 0, cloudImages_[imgIdx], 1.0)
+            nvgBeginPath(titleNvg_)
+            nvgRect(titleNvg_, drawX - dw * 0.5, drawY - dh * 0.5, dw, dh)
+            nvgFillPaint(titleNvg_, paint)
+            nvgFill(titleNvg_)
+            nvgRestore(titleNvg_)
+        end
     end
 
     nvgEndFrame(titleNvg_)

@@ -9,6 +9,7 @@ local Player = require("Player")
 local CloneSystem = require("CloneSystem")
 local LevelData = require("LevelData")
 local SceneManager = require("SceneManager")
+local ParallaxBackground = require("ParallaxBackground")
 
 local GameScene = {}
 
@@ -45,6 +46,21 @@ local screenH_ = 0
 local debugMode_ = false
 -- 测试模式（可调重力）
 local testMode_ = false
+-- 视差背景
+local parallaxBg_ = nil
+
+-- ============================================================================
+-- 精灵帧动画系统
+-- ============================================================================
+local spriteFrames_ = {
+    idle = {},    -- nvgImage 句柄数组
+    run = {},
+    jump = {},
+    showoff = {},
+}
+local spriteAnimTimer_ = 0      -- 全局动画计时器
+local SPRITE_FPS = 8            -- 动画帧率（帧/秒）
+local SPRITE_DRAW_SIZE = 48     -- 精灵绘制大小（像素）
 
 -- ============================================================================
 -- 工具函数
@@ -56,6 +72,85 @@ local function PhysicsToScreen(px, py)
     local sx = screenW_ / 2 + (px - camPos.x) * Config.PixelsPerUnit
     local sy = screenH_ / 2 - (py - camPos.y) * Config.PixelsPerUnit
     return sx, sy
+end
+
+-- ============================================================================
+-- 精灵帧加载与动画
+-- ============================================================================
+
+function GameScene.LoadSpriteFrames()
+    -- idle: 4帧
+    for i = 1, 4 do
+        local path = "image/character/idle/berie_idle_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.idle, img)
+    end
+    -- jump: 4帧
+    for i = 1, 4 do
+        local path = "image/character/jump/berie_jump_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.jump, img)
+    end
+    -- run: 6帧
+    for i = 1, 6 do
+        local path = "image/character/run/berie_run_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.run, img)
+    end
+    -- showoff: 7帧
+    for i = 1, 7 do
+        local path = "image/character/showoff/berie_showoff_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.showoff, img)
+    end
+    print("[GameScene] Loaded sprite frames: idle=" .. #spriteFrames_.idle
+        .. " jump=" .. #spriteFrames_.jump
+        .. " run=" .. #spriteFrames_.run
+        .. " showoff=" .. #spriteFrames_.showoff)
+end
+
+--- 根据角色物理状态获取当前动画名和帧索引
+---@param player table
+---@return string animName, number frameIndex
+function GameScene.GetAnimFrame(player)
+    local vel = player.body and player.body.linearVelocity or Vector2(0, 0)
+
+    -- 到达终点 → showoff
+    if player.reachedGoal then
+        local totalFrames = #spriteFrames_.showoff
+        local idx = math.floor(spriteAnimTimer_ * SPRITE_FPS) % totalFrames + 1
+        return "showoff", idx
+    end
+
+    -- 空中（不在地面）→ jump
+    if not player.onGround then
+        -- 上升用前两帧，下降用后两帧
+        local jumpFrames = #spriteFrames_.jump
+        if jumpFrames > 0 then
+            local idx
+            if vel.y > 0.5 then
+                -- 上升
+                idx = math.floor(spriteAnimTimer_ * SPRITE_FPS) % 2 + 1
+            else
+                -- 下降
+                idx = math.floor(spriteAnimTimer_ * SPRITE_FPS) % 2 + 3
+                if idx > jumpFrames then idx = jumpFrames end
+            end
+            return "jump", idx
+        end
+    end
+
+    -- 地面上有水平速度 → run
+    if math.abs(vel.x) > 0.5 then
+        local totalFrames = #spriteFrames_.run
+        local idx = math.floor(spriteAnimTimer_ * (SPRITE_FPS + 2)) % totalFrames + 1
+        return "run", idx
+    end
+
+    -- 静止 → idle
+    local totalFrames = #spriteFrames_.idle
+    local idx = math.floor(spriteAnimTimer_ * SPRITE_FPS) % totalFrames + 1
+    return "idle", idx
 end
 
 -- ============================================================================
@@ -73,6 +168,12 @@ function GameScene.Enter(params)
     -- 创建 NanoVG 上下文
     nvg_ = nvgCreate(1)
     nvgCreateFont(nvg_, "sans", "Fonts/MiSans-Regular.ttf")
+
+    -- 创建背景（zoom=1.75 放大显示细节）
+    parallaxBg_ = ParallaxBackground.Create(nvg_, nil, 1.75)
+
+    -- 加载角色精灵帧
+    GameScene.LoadSpriteFrames()
 
     -- 创建场景
     GameScene.CreatePhysicsScene()
@@ -106,7 +207,24 @@ function GameScene.Exit()
     UnsubscribeFromEvent("PhysicsBeginContact2D")
     UnsubscribeFromEvent("PhysicsEndContact2D")
 
+    -- 清理视差背景
+    if parallaxBg_ then
+        parallaxBg_:Destroy()
+        parallaxBg_ = nil
+    end
+
     if nvg_ then
+        -- 释放精灵帧图片
+        for _, frames in pairs(spriteFrames_) do
+            for _, img in ipairs(frames) do
+                if img and img ~= 0 then
+                    nvgDeleteImage(nvg_, img)
+                end
+            end
+        end
+        spriteFrames_ = { idle = {}, run = {}, jump = {}, showoff = {} }
+        spriteAnimTimer_ = 0
+
         UnsubscribeFromEvent(nvg_, "NanoVGRender")
         nvgDelete(nvg_)
         nvg_ = nil
@@ -304,6 +422,14 @@ function GameScene_HandleUpdate(eventType, eventData)
 end
 
 function GameScene.UpdatePlaying(dt)
+    -- 更新背景（云朵滚动）
+    if parallaxBg_ then
+        parallaxBg_:Update(dt)
+    end
+
+    -- 更新精灵动画计时器
+    spriteAnimTimer_ = spriteAnimTimer_ + dt
+
     -- 更新克隆系统（计时器 + 角色生成）
     if cloneSystem_ then
         cloneSystem_:Update(dt)
@@ -466,10 +592,11 @@ end
 function GameScene_HandleRender(eventType, eventData)
     if not nvg_ then return end
 
-    screenW_ = graphics:GetWidth()
-    screenH_ = graphics:GetHeight()
+    local dpr = graphics:GetDPR()
+    screenW_ = graphics:GetWidth() / dpr
+    screenH_ = graphics:GetHeight() / dpr
 
-    nvgBeginFrame(nvg_, screenW_, screenH_, 1.0)
+    nvgBeginFrame(nvg_, screenW_, screenH_, dpr)
 
     GameScene.DrawBackground()
     GameScene.DrawPlatforms()
@@ -486,15 +613,21 @@ function GameScene_HandleRender(eventType, eventData)
 end
 
 function GameScene.DrawBackground()
-    local c1 = Config.Colors.Background1
-    local c2 = Config.Colors.Background2
-    nvgBeginPath(nvg_)
-    nvgRect(nvg_, 0, 0, screenW_, screenH_)
-    local bg = nvgLinearGradient(nvg_, 0, 0, 0, screenH_,
-        nvgRGBA(c1[1], c1[2], c1[3], c1[4]),
-        nvgRGBA(c2[1], c2[2], c2[3], c2[4]))
-    nvgFillPaint(nvg_, bg)
-    nvgFill(nvg_)
+    -- 使用视差背景系统
+    if parallaxBg_ then
+        parallaxBg_:Draw(screenW_, screenH_)
+    else
+        -- 回退到纯色渐变
+        local c1 = Config.Colors.Background1
+        local c2 = Config.Colors.Background2
+        nvgBeginPath(nvg_)
+        nvgRect(nvg_, 0, 0, screenW_, screenH_)
+        local bg = nvgLinearGradient(nvg_, 0, 0, 0, screenH_,
+            nvgRGBA(c1[1], c1[2], c1[3], c1[4]),
+            nvgRGBA(c2[1], c2[2], c2[3], c2[4]))
+        nvgFillPaint(nvg_, bg)
+        nvgFill(nvg_)
+    end
 end
 
 function GameScene.DrawPlatforms()
@@ -597,37 +730,43 @@ end
 function GameScene.DrawSingleCharacter(player)
     local pos = player:GetPosition()
     local sx, sy = PhysicsToScreen(pos.x, pos.y)
-    local radius = Config.PlayerRadius * Config.PixelsPerUnit
-    local c = Config.CloneColors[player.colorIndex] or Config.Colors.Player
+    local vel = player.body and player.body.linearVelocity or Vector2(0, 0)
 
-    -- 阴影
+    -- 获取当前动画帧
+    local animName, frameIdx = GameScene.GetAnimFrame(player)
+    local frames = spriteFrames_[animName]
+    if not frames or #frames == 0 then return end
+
+    local imgHandle = frames[frameIdx]
+    if not imgHandle or imgHandle == 0 then return end
+
+    -- 计算绘制区域（以角色物理中心为基准，精灵稍大于碰撞体）
+    local drawSize = SPRITE_DRAW_SIZE * (Config.PixelsPerUnit / 50)  -- 根据缩放比调整
+    local halfSize = drawSize / 2
+
+    -- 判断朝向（根据水平速度翻转）
+    local flipX = false
+    if vel.x < -0.1 then
+        flipX = true
+    end
+
+    -- 使用 nvgImagePattern 绘制精灵
+    nvgSave(nvg_)
+
+    if flipX then
+        -- 水平翻转：平移到精灵中心，水平缩放 -1，再移回
+        nvgTranslate(nvg_, sx, sy)
+        nvgScale(nvg_, -1, 1)
+        nvgTranslate(nvg_, -sx, -sy)
+    end
+
+    local imgPat = nvgImagePattern(nvg_, sx - halfSize, sy - halfSize, drawSize, drawSize, 0, imgHandle, 1.0)
     nvgBeginPath(nvg_)
-    nvgCircle(nvg_, sx + 2, sy + 2, radius)
-    nvgFillColor(nvg_, nvgRGBA(0, 0, 0, 60))
+    nvgRect(nvg_, sx - halfSize, sy - halfSize, drawSize, drawSize)
+    nvgFillPaint(nvg_, imgPat)
     nvgFill(nvg_)
 
-    -- 身体渐变
-    nvgBeginPath(nvg_)
-    nvgCircle(nvg_, sx, sy, radius)
-    local bodyGrad = nvgRadialGradient(nvg_, sx - 5, sy - 5, 3, radius + 3,
-        nvgRGBA(math.min(c[1] + 60, 255), math.min(c[2] + 60, 255), math.min(c[3] + 60, 255), 255),
-        nvgRGBA(c[1], c[2], c[3], 255))
-    nvgFillPaint(nvg_, bodyGrad)
-    nvgFill(nvg_)
-
-    -- 眼睛
-    nvgBeginPath(nvg_)
-    nvgCircle(nvg_, sx - 5, sy - 3, 3)
-    nvgCircle(nvg_, sx + 5, sy - 3, 3)
-    nvgFillColor(nvg_, nvgRGBA(255, 255, 255, 255))
-    nvgFill(nvg_)
-    nvgBeginPath(nvg_)
-    nvgCircle(nvg_, sx - 4, sy - 2, 1.5)
-    nvgCircle(nvg_, sx + 6, sy - 2, 1.5)
-    nvgFillColor(nvg_, nvgRGBA(30, 30, 30, 255))
-    nvgFill(nvg_)
-
-    -- 到达终点的角色已不可见，无需绘制标记
+    nvgRestore(nvg_)
 end
 
 -- ============================================================================
