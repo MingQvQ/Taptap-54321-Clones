@@ -1,0 +1,39 @@
+{
+    "description": "关卡选择界面布局配置",
+    "grid": {
+        "rows": 3,
+        "cols": 5,
+        "nodeSize": 52,
+        "gap": 20
+    },
+    "path": [
+        { "row": 2, "col": 1, "comment": "关卡1: 中间行起点" },
+        { "row": 2, "col": 2, "comment": "关卡2" },
+        { "row": 2, "col": 3, "comment": "关卡3（上拐点）" },
+        { "row": 1, "col": 3, "comment": "关卡4: 顶行（向上拐）" },
+        { "row": 1, "col": 4, "comment": "关卡5" },
+        { "row": 1, "col": 5, "comment": "关卡6（下拐点）" },
+        { "row": 2, "col": 5, "comment": "关卡7（向下）" },
+        { "row": 3, "col": 5, "comment": "关卡8: 底行（继续向下）" },
+        { "row": 3, "col": 4, "comment": "关卡9（向左）" },
+        { "row": 3, "col": 3, "comment": "关卡10" },
+        { "row": 3, "col": 2, "comment": "关卡11" },
+        { "row": 3, "col": 1, "comment": "关卡12: 底行终点" }
+    ],
+    "style": {
+        "unlocked": {
+            "backgroundColor": [180, 40, 50, 255],
+            "borderColor": [220, 60, 70, 255],
+            "textColor": [255, 255, 255, 255]
+        },
+        "locked": {
+            "backgroundColor": [60, 60, 60, 120],
+            "borderColor": [150, 150, 150, 120],
+            "icon": "🔒"
+        },
+        "connection": {
+            "color": [180, 180, 180, 150],
+            "thickness": 3
+        }
+    }
+}

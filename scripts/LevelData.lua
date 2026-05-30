@@ -14,6 +14,9 @@ LevelData.Levels = {}
 ---@return table|nil
 local function LoadLevelFromJSON(index)
     local path = "Levels/level_" .. index .. ".json"
+    if not cache:Exists(path) then
+        return nil
+    end
     local file = cache:GetFile(path)
     if file == nil then
         return nil
