@@ -13,6 +13,51 @@ local LevelData = require("LevelData")
 local UIScenes = {}
 
 -- ============================================================================
+-- 通用 Tween 动画管理（跨场景共享）
+-- ============================================================================
+
+local activeTweens_ = {}
+
+--- 给控件添加缩放动画
+local function AnimateScale(widget, proxy, targetScale, easing, duration)
+    -- 移除该代理上旧的 tween
+    local i = 1
+    while i <= #activeTweens_ do
+        if activeTweens_[i].proxy == proxy then
+            table.remove(activeTweens_, i)
+        else
+            i = i + 1
+        end
+    end
+    -- 新建 tween
+    local tw = tween.new(duration or 0.2, proxy, { scale = targetScale }, easing or "outBack")
+    table.insert(activeTweens_, { tween = tw, proxy = proxy, widget = widget })
+end
+
+--- 每帧驱动所有活跃的 tween
+local function UpdateTweens(dt)
+    local i = 1
+    while i <= #activeTweens_ do
+        local entry = activeTweens_[i]
+        local finished = entry.tween:update(dt)
+        if entry.widget and entry.proxy then
+            entry.widget:SetProp("scale", entry.proxy.scale)
+        end
+        if finished then
+            if entry.onComplete then entry.onComplete() end
+            table.remove(activeTweens_, i)
+        else
+            i = i + 1
+        end
+    end
+end
+
+--- 清除所有 tween
+local function ClearAllTweens()
+    activeTweens_ = {}
+end
+
+-- ============================================================================
 -- 开始游戏界面 (Title Screen) - 滚动天空背景 + 克隆人标题
 -- ============================================================================
 
@@ -77,26 +122,58 @@ function TitleScene.Enter(params)
                     },
                     -- 间隔
                     UI.Panel { height = 16 },
-                    -- 开始按钮
-                    UI.Button {
-                        text = "开始游戏",
-                        variant = "primary",
-                        width = 200,
-                        height = 48,
-                        onClick = function(self)
-                            SceneManager.SwitchTo(SceneManager.SCENE_LEVEL_SELECT)
-                        end,
-                    },
-                    -- 设置按钮
-                    UI.Button {
-                        text = "设置",
-                        variant = "outline",
-                        width = 200,
-                        height = 44,
-                        onClick = function(self)
-                            SceneManager.SwitchTo(SceneManager.SCENE_SETTINGS)
-                        end,
-                    },
+                    -- 开始按钮（带 tween 动画）
+                    (function()
+                        local proxy = { scale = 1.0 }
+                        return UI.Button {
+                            text = "开始游戏",
+                            variant = "primary",
+                            width = 200,
+                            height = 48,
+                            scale = 1.0,
+                            onPointerEnter = function(ev, self)
+                                AnimateScale(self, proxy, 1.1, "outBack", 0.2)
+                            end,
+                            onPointerLeave = function(ev, self)
+                                AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
+                            end,
+                            onPointerDown = function(ev, self)
+                                AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
+                            end,
+                            onPointerUp = function(ev, self)
+                                AnimateScale(self, proxy, 1.1, "outBack", 0.15)
+                            end,
+                            onClick = function(self)
+                                SceneManager.SwitchTo(SceneManager.SCENE_LEVEL_SELECT)
+                            end,
+                        }
+                    end)(),
+                    -- 设置按钮（带 tween 动画）
+                    (function()
+                        local proxy = { scale = 1.0 }
+                        return UI.Button {
+                            text = "设置",
+                            variant = "outline",
+                            width = 200,
+                            height = 44,
+                            scale = 1.0,
+                            onPointerEnter = function(ev, self)
+                                AnimateScale(self, proxy, 1.1, "outBack", 0.2)
+                            end,
+                            onPointerLeave = function(ev, self)
+                                AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
+                            end,
+                            onPointerDown = function(ev, self)
+                                AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
+                            end,
+                            onPointerUp = function(ev, self)
+                                AnimateScale(self, proxy, 1.1, "outBack", 0.15)
+                            end,
+                            onClick = function(self)
+                                SceneManager.SwitchTo(SceneManager.SCENE_SETTINGS)
+                            end,
+                        }
+                    end)(),
                     -- 版本号
                     UI.Panel { height = 6 },
                     UI.Label {
@@ -117,6 +194,7 @@ function TitleScene.Exit()
     if titleNvg_ then
         UnsubscribeFromEvent(titleNvg_, "NanoVGRender")
     end
+    ClearAllTweens()
     UI.SetRoot(nil)
     titleNvg_ = nil
     titleBgTexture_ = nil
@@ -129,6 +207,8 @@ function TitleScene_HandleUpdate(eventType, eventData)
     local dt = eventData["TimeStep"]:GetFloat()
     -- 背景从右向左滚动，速度约 30 像素/秒
     titleScrollOffset_ = titleScrollOffset_ + dt * 30
+    -- 驱动按钮 tween 动画
+    UpdateTweens(dt)
 end
 
 function TitleScene_HandleRender(eventType, eventData)
@@ -180,43 +260,6 @@ end
 -- ============================================================================
 
 local LevelSelectScene = {}
-
--- Tween 动画管理
-local levelSelectTweens_ = {}
-
-local function AddTween(duration, subject, target, easing, onComplete)
-    local tw = tween.new(duration, subject, target, easing or "outBack")
-    table.insert(levelSelectTweens_, { tween = tw, onComplete = onComplete })
-    return tw
-end
-
-local function ClearTweensForSubject(subject)
-    local i = 1
-    while i <= #levelSelectTweens_ do
-        local entry = levelSelectTweens_[i]
-        if entry.subject == subject then
-            table.remove(levelSelectTweens_, i)
-        else
-            i = i + 1
-        end
-    end
-end
-
---- 给按钮添加缩放动画
-local function AnimateScale(widget, proxy, targetScale, easing, duration)
-    -- 移除该代理上旧的 tween
-    local i = 1
-    while i <= #levelSelectTweens_ do
-        if levelSelectTweens_[i].proxy == proxy then
-            table.remove(levelSelectTweens_, i)
-        else
-            i = i + 1
-        end
-    end
-    -- 新建 tween
-    local tw = tween.new(duration or 0.2, proxy, { scale = targetScale }, easing or "outBack")
-    table.insert(levelSelectTweens_, { tween = tw, proxy = proxy, widget = widget })
-end
 
 --- 从 JSON 加载关卡选择布局配置
 local function LoadLevelSelectConfig()
@@ -279,7 +322,7 @@ local function CreateLevelNode(index, unlocked, nodeSize, style)
             borderColor = bdColor,
             scale = 1.0,
             onPointerEnter = function(ev, self)
-                AnimateScale(self, proxy, 1.25, "outBack", 0.2)
+                AnimateScale(self, proxy, 1.1, "outBack", 0.2)
             end,
             onPointerLeave = function(ev, self)
                 AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
@@ -287,11 +330,11 @@ local function CreateLevelNode(index, unlocked, nodeSize, style)
                 self:SetProp("backgroundColor", bgColor)
             end,
             onPointerDown = function(ev, self)
-                AnimateScale(self, proxy, 0.85, "outQuart", 0.1)
+                AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
                 self:SetProp("backgroundColor", { 120, 120, 120, 255 })
             end,
             onPointerUp = function(ev, self)
-                AnimateScale(self, proxy, 1.25, "outBack", 0.15)
+                AnimateScale(self, proxy, 1.1, "outBack", 0.15)
                 self:SetProp("backgroundColor", bgColor)
             end,
             onClick = function(self)
@@ -591,26 +634,12 @@ end
 
 function LevelSelectScene_HandleUpdate(eventType, eventData)
     local dt = eventData["TimeStep"]:GetFloat()
-    local i = 1
-    while i <= #levelSelectTweens_ do
-        local entry = levelSelectTweens_[i]
-        local finished = entry.tween:update(dt)
-        -- 应用 scale 到 widget
-        if entry.widget and entry.proxy then
-            entry.widget:SetProp("scale", entry.proxy.scale)
-        end
-        if finished then
-            if entry.onComplete then entry.onComplete() end
-            table.remove(levelSelectTweens_, i)
-        else
-            i = i + 1
-        end
-    end
+    UpdateTweens(dt)
 end
 
 function LevelSelectScene.Exit()
     UnsubscribeFromEvent("Update")
-    levelSelectTweens_ = {}
+    ClearAllTweens()
     UI.SetRoot(nil)
 end
 
