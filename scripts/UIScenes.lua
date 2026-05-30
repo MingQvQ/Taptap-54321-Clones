@@ -199,33 +199,52 @@ local function LoadLevelSelectConfig()
     return data
 end
 
--- 默认路径配置（当 JSON 加载失败时）
+-- 默认路径配置（蛇形：左→右，下，右→左，下，左→右）
 local DEFAULT_LEVEL_POSITIONS = {
-    { row = 2, col = 1 },
-    { row = 2, col = 2 },
-    { row = 2, col = 3 },
-    { row = 1, col = 3 },
-    { row = 1, col = 4 },
-    { row = 1, col = 5 },
-    { row = 2, col = 5 },
-    { row = 3, col = 5 },
-    { row = 3, col = 4 },
-    { row = 3, col = 3 },
-    { row = 3, col = 2 },
-    { row = 3, col = 1 },
+    { row = 1, col = 1 },  -- 关卡1
+    { row = 1, col = 2 },  -- 关卡2
+    { row = 1, col = 3 },  -- 关卡3
+    { row = 1, col = 4 },  -- 关卡4
+    { row = 1, col = 5 },  -- 关卡5
+    { row = 2, col = 5 },  -- 关卡6: 右边下来
+    { row = 2, col = 4 },  -- 关卡7
+    { row = 2, col = 3 },  -- 关卡8
+    { row = 2, col = 2 },  -- 关卡9
+    { row = 2, col = 1 },  -- 关卡10
+    { row = 3, col = 1 },  -- 关卡11: 左边下来
+    { row = 3, col = 2 },  -- 关卡12
+    { row = 3, col = 3 },  -- 关卡13
+    { row = 3, col = 4 },  -- 关卡14
+    { row = 3, col = 5 },  -- 关卡15
+    { row = 1, col = 6 },  -- 关卡16: 上去开始第二段
+    { row = 1, col = 7 },  -- 关卡17
+    { row = 2, col = 6 },  -- 关卡18: 下来第二段
+    { row = 2, col = 7 },  -- 关卡19
+    { row = 2, col = 8 },  -- 关卡20
+}
+
+-- 默认样式
+local DEFAULT_STYLE = {
+    unlocked = { backgroundColor = { 180, 40, 50, 255 }, borderColor = { 0, 0, 0, 255 }, textColor = { 255, 255, 255, 255 } },
+    locked = { backgroundColor = { 0, 0, 0, 0 }, borderColor = { 255, 255, 255, 150 }, icon = "🔒" },
+    connection = { color = { 255, 255, 255, 150 }, thickness = 3 },
 }
 
 --- 创建关卡节点
-local function CreateLevelNode(index, unlocked, nodeSize)
+local function CreateLevelNode(index, unlocked, nodeSize, style)
+    local s = style or DEFAULT_STYLE
     if unlocked then
+        local bgColor = s.unlocked and s.unlocked.backgroundColor or DEFAULT_STYLE.unlocked.backgroundColor
+        local bdColor = s.unlocked and s.unlocked.borderColor or DEFAULT_STYLE.unlocked.borderColor
+        local txtColor = s.unlocked and s.unlocked.textColor or DEFAULT_STYLE.unlocked.textColor
         return UI.Panel {
             width = nodeSize, height = nodeSize,
             justifyContent = "center",
             alignItems = "center",
-            backgroundColor = { 180, 40, 50, 255 },
+            backgroundColor = bgColor,
             borderRadius = 6,
             borderWidth = 2,
-            borderColor = { 220, 60, 70, 255 },
+            borderColor = bdColor,
             onClick = function(self)
                 SceneManager.SwitchTo(SceneManager.SCENE_GAME, { level = index })
             end,
@@ -234,22 +253,25 @@ local function CreateLevelNode(index, unlocked, nodeSize)
                     text = tostring(index),
                     fontSize = 22,
                     fontWeight = "bold",
-                    fontColor = { 255, 255, 255, 255 },
+                    fontColor = txtColor,
                 },
             }
         }
     else
+        local bgColor = s.locked and s.locked.backgroundColor or DEFAULT_STYLE.locked.backgroundColor
+        local bdColor = s.locked and s.locked.borderColor or DEFAULT_STYLE.locked.borderColor
+        local icon = s.locked and s.locked.icon or DEFAULT_STYLE.locked.icon
         return UI.Panel {
             width = nodeSize, height = nodeSize,
             justifyContent = "center",
             alignItems = "center",
-            backgroundColor = { 60, 60, 60, 120 },
+            backgroundColor = bgColor,
             borderRadius = 6,
             borderWidth = 2,
-            borderColor = { 150, 150, 150, 120 },
+            borderColor = bdColor,
             children = {
                 UI.Label {
-                    text = "🔒",
+                    text = icon,
                     fontSize = 20,
                 },
             }
@@ -258,32 +280,38 @@ local function CreateLevelNode(index, unlocked, nodeSize)
 end
 
 --- 创建水平连接线
-local function CreateHLine(gapWidth)
+local function CreateHLine(gapWidth, style)
+    local s = style or DEFAULT_STYLE
+    local color = s.connection and s.connection.color or DEFAULT_STYLE.connection.color
+    local thickness = s.connection and s.connection.thickness or DEFAULT_STYLE.connection.thickness
     return UI.Panel {
-        width = gapWidth, height = 3,
-        backgroundColor = { 180, 180, 180, 150 },
+        width = gapWidth, height = thickness,
+        backgroundColor = color,
         borderRadius = 1,
         alignSelf = "center",
     }
 end
 
 --- 创建垂直连接线（包裹在nodeSize宽容器中居中）
-local function CreateVLine(nodeSize, gapHeight)
+local function CreateVLine(nodeSize, gapHeight, style)
+    local s = style or DEFAULT_STYLE
+    local color = s.connection and s.connection.color or DEFAULT_STYLE.connection.color
+    local thickness = s.connection and s.connection.thickness or DEFAULT_STYLE.connection.thickness
     return UI.Panel {
         width = nodeSize, height = gapHeight,
         justifyContent = "center",
         alignItems = "center",
         children = {
             UI.Panel {
-                width = 3, height = gapHeight,
-                backgroundColor = { 180, 180, 180, 150 },
+                width = thickness, height = gapHeight,
+                backgroundColor = color,
                 borderRadius = 1,
             },
         }
     }
 end
 
---- 预计算连接关系
+--- 预计算连接关系（支持对角线路径：自动拆分为垂直+水平两段）
 local function ComputeConnections(levelPositions, gridRows)
     local hConn = {}
     local vConn = {}
@@ -295,16 +323,30 @@ local function ComputeConnections(levelPositions, gridRows)
         local a = levelPositions[i]
         local b = levelPositions[i + 1]
         if a.row == b.row then
+            -- 同行：水平连接
             local minCol = math.min(a.col, b.col)
             local maxCol = math.max(a.col, b.col)
             for c = minCol, maxCol - 1 do
                 hConn[a.row][c] = true
             end
         elseif a.col == b.col then
+            -- 同列：垂直连接
             local minRow = math.min(a.row, b.row)
             local maxRow = math.max(a.row, b.row)
             for r = minRow, maxRow - 1 do
                 vConn[r][a.col] = true
+            end
+        else
+            -- 对角线：拆分为先垂直(在起点列)再水平(在终点行)
+            local minRow = math.min(a.row, b.row)
+            local maxRow = math.max(a.row, b.row)
+            for r = minRow, maxRow - 1 do
+                vConn[r][a.col] = true
+            end
+            local minCol = math.min(a.col, b.col)
+            local maxCol = math.max(a.col, b.col)
+            for c = minCol, maxCol - 1 do
+                hConn[b.row][c] = true
             end
         end
     end
@@ -318,10 +360,12 @@ function LevelSelectScene.Enter(params)
     -- 加载 JSON 配置
     local config = LoadLevelSelectConfig()
     local gridRows = 3
-    local gridCols = 5
-    local nodeSize = 52
-    local gapSize = 20
+    local gridCols = 8
+    local nodeSize = 48
+    local gapSize = 16
     local levelPositions = DEFAULT_LEVEL_POSITIONS
+
+    local style = DEFAULT_STYLE
 
     if config then
         gridRows = config.grid and config.grid.rows or gridRows
@@ -330,6 +374,9 @@ function LevelSelectScene.Enter(params)
         gapSize = config.grid and config.grid.gap or gapSize
         if config.path and #config.path > 0 then
             levelPositions = config.path
+        end
+        if config.style then
+            style = config.style
         end
     end
 
@@ -420,7 +467,7 @@ function LevelSelectScene.Enter(params)
 
             if levelIndex then
                 local unlocked = (levelIndex <= unlockedCount)
-                table.insert(rowChildren, CreateLevelNode(levelIndex, unlocked, nodeSize))
+                table.insert(rowChildren, CreateLevelNode(levelIndex, unlocked, nodeSize, style))
             else
                 table.insert(rowChildren, UI.Panel { width = nodeSize, height = nodeSize })
             end
@@ -428,7 +475,7 @@ function LevelSelectScene.Enter(params)
             -- 水平连接线
             if col < gridCols then
                 if hConn[row][col] then
-                    table.insert(rowChildren, CreateHLine(gapSize))
+                    table.insert(rowChildren, CreateHLine(gapSize, style))
                 else
                     table.insert(rowChildren, UI.Panel { width = gapSize, height = 3 })
                 end
@@ -447,7 +494,7 @@ function LevelSelectScene.Enter(params)
             local vLineChildren = {}
             for col = 1, gridCols do
                 if vConn[row][col] then
-                    table.insert(vLineChildren, CreateVLine(nodeSize, gapSize))
+                    table.insert(vLineChildren, CreateVLine(nodeSize, gapSize, style))
                 else
                     table.insert(vLineChildren, UI.Panel { width = nodeSize, height = gapSize })
                 end

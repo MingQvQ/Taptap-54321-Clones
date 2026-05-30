@@ -1,38 +1,46 @@
 {
-    "description": "关卡选择界面布局配置",
+    "description": "关卡选择界面布局 - 蛇形路径，支持20关",
     "grid": {
         "rows": 3,
-        "cols": 5,
-        "nodeSize": 52,
-        "gap": 20
+        "cols": 8,
+        "nodeSize": 48,
+        "gap": 16
     },
     "path": [
-        { "row": 2, "col": 1, "comment": "关卡1: 中间行起点" },
-        { "row": 2, "col": 2, "comment": "关卡2" },
-        { "row": 2, "col": 3, "comment": "关卡3（上拐点）" },
-        { "row": 1, "col": 3, "comment": "关卡4: 顶行（向上拐）" },
-        { "row": 1, "col": 4, "comment": "关卡5" },
-        { "row": 1, "col": 5, "comment": "关卡6（下拐点）" },
-        { "row": 2, "col": 5, "comment": "关卡7（向下）" },
-        { "row": 3, "col": 5, "comment": "关卡8: 底行（继续向下）" },
-        { "row": 3, "col": 4, "comment": "关卡9（向左）" },
-        { "row": 3, "col": 3, "comment": "关卡10" },
-        { "row": 3, "col": 2, "comment": "关卡11" },
-        { "row": 3, "col": 1, "comment": "关卡12: 底行终点" }
+        { "row": 1, "col": 1, "comment": "关卡1" },
+        { "row": 1, "col": 2, "comment": "关卡2" },
+        { "row": 1, "col": 3, "comment": "关卡3" },
+        { "row": 1, "col": 4, "comment": "关卡4" },
+        { "row": 1, "col": 5, "comment": "关卡5" },
+        { "row": 2, "col": 5, "comment": "关卡6: 右边下来" },
+        { "row": 2, "col": 4, "comment": "关卡7" },
+        { "row": 2, "col": 3, "comment": "关卡8" },
+        { "row": 2, "col": 2, "comment": "关卡9" },
+        { "row": 2, "col": 1, "comment": "关卡10" },
+        { "row": 3, "col": 1, "comment": "关卡11: 左边下来" },
+        { "row": 3, "col": 2, "comment": "关卡12" },
+        { "row": 3, "col": 3, "comment": "关卡13" },
+        { "row": 3, "col": 4, "comment": "关卡14" },
+        { "row": 3, "col": 5, "comment": "关卡15" },
+        { "row": 1, "col": 6, "comment": "关卡16: 上去开始第二段" },
+        { "row": 1, "col": 7, "comment": "关卡17" },
+        { "row": 2, "col": 6, "comment": "关卡18: 下来第二段" },
+        { "row": 2, "col": 7, "comment": "关卡19" },
+        { "row": 2, "col": 8, "comment": "关卡20" }
     ],
     "style": {
         "unlocked": {
             "backgroundColor": [180, 40, 50, 255],
-            "borderColor": [220, 60, 70, 255],
+            "borderColor": [0, 0, 0, 255],
             "textColor": [255, 255, 255, 255]
         },
         "locked": {
-            "backgroundColor": [60, 60, 60, 120],
-            "borderColor": [150, 150, 150, 120],
+            "backgroundColor": [0, 0, 0, 0],
+            "borderColor": [255, 255, 255, 150],
             "icon": "🔒"
         },
         "connection": {
-            "color": [180, 180, 180, 150],
+            "color": [255, 255, 255, 150],
             "thickness": 3
         }
     }
