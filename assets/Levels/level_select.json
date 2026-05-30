@@ -1,24 +1,22 @@
 {
-    "description": "关卡选择界面布局 - 锯齿蛇形路径, 3行5列, 12关",
+    "description": "关卡选择界面布局 - 锯齿蛇形路径, 2行7列, 10关",
     "grid": {
-        "rows": 3,
-        "cols": 5,
+        "rows": 2,
+        "cols": 7,
         "nodeSize": 52,
         "gap": 20
     },
     "path": [
-        { "row": 1, "col": 1, "comment": "关卡1: 起点(左上)" },
+        { "row": 1, "col": 1, "comment": "关卡1: 起点" },
         { "row": 1, "col": 2, "comment": "关卡2: 右" },
         { "row": 2, "col": 2, "comment": "关卡3: 下" },
         { "row": 2, "col": 3, "comment": "关卡4: 右" },
-        { "row": 1, "col": 3, "comment": "关卡5: 上" },
-        { "row": 1, "col": 4, "comment": "关卡6: 右" },
-        { "row": 2, "col": 4, "comment": "关卡7: 下" },
-        { "row": 2, "col": 5, "comment": "关卡8: 右" },
-        { "row": 3, "col": 5, "comment": "关卡9: 下" },
-        { "row": 3, "col": 4, "comment": "关卡10: 左" },
-        { "row": 3, "col": 3, "comment": "关卡11: 左" },
-        { "row": 3, "col": 2, "comment": "关卡12: 左(终点)" }
+        { "row": 2, "col": 4, "comment": "关卡5: 右" },
+        { "row": 1, "col": 4, "comment": "关卡6: 上" },
+        { "row": 1, "col": 5, "comment": "关卡7: 右" },
+        { "row": 1, "col": 6, "comment": "关卡8: 右" },
+        { "row": 2, "col": 6, "comment": "关卡9: 下" },
+        { "row": 2, "col": 7, "comment": "关卡10: 右(终点)" }
     ],
     "style": {
         "unlocked": {
