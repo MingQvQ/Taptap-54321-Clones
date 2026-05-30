@@ -10,6 +10,7 @@ SceneManager.SCENE_TITLE = "title"
 SceneManager.SCENE_LEVEL_SELECT = "level_select"
 SceneManager.SCENE_GAME = "game"
 SceneManager.SCENE_SETTINGS = "settings"
+SceneManager.SCENE_EDITOR = "editor"
 
 
 -- 当前场景

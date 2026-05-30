@@ -13,6 +13,7 @@ local LevelData = require("LevelData")
 -- 加载各模块（注册场景）
 require("GameScene")
 require("UIScenes")
+require("LevelEditor.LevelEditorUI")
 
 -- ============================================================================
 -- 生命周期

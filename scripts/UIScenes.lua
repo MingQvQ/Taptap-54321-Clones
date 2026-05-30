@@ -174,6 +174,32 @@ function TitleScene.Enter(params)
                             end,
                         }
                     end)(),
+                    -- 关卡编辑器按钮（带 tween 动画）
+                    (function()
+                        local proxy = { scale = 1.0 }
+                        return UI.Button {
+                            text = "关卡编辑器",
+                            variant = "outline",
+                            width = 200,
+                            height = 44,
+                            scale = 1.0,
+                            onPointerEnter = function(ev, self)
+                                AnimateScale(self, proxy, 1.1, "outBack", 0.2)
+                            end,
+                            onPointerLeave = function(ev, self)
+                                AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
+                            end,
+                            onPointerDown = function(ev, self)
+                                AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
+                            end,
+                            onPointerUp = function(ev, self)
+                                AnimateScale(self, proxy, 1.1, "outBack", 0.15)
+                            end,
+                            onClick = function(self)
+                                SceneManager.SwitchTo(SceneManager.SCENE_EDITOR)
+                            end,
+                        }
+                    end)(),
                     -- 版本号
                     UI.Panel { height = 6 },
                     UI.Label {
