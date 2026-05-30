@@ -5,6 +5,7 @@
 -- ============================================================================
 
 local UI = require("urhox-libs/UI")
+local tween = require("tween")
 local Config = require("Config")
 local SceneManager = require("SceneManager")
 local LevelData = require("LevelData")
@@ -180,6 +181,43 @@ end
 
 local LevelSelectScene = {}
 
+-- Tween 动画管理
+local levelSelectTweens_ = {}
+
+local function AddTween(duration, subject, target, easing, onComplete)
+    local tw = tween.new(duration, subject, target, easing or "outBack")
+    table.insert(levelSelectTweens_, { tween = tw, onComplete = onComplete })
+    return tw
+end
+
+local function ClearTweensForSubject(subject)
+    local i = 1
+    while i <= #levelSelectTweens_ do
+        local entry = levelSelectTweens_[i]
+        if entry.subject == subject then
+            table.remove(levelSelectTweens_, i)
+        else
+            i = i + 1
+        end
+    end
+end
+
+--- 给按钮添加缩放动画
+local function AnimateScale(widget, proxy, targetScale, easing, duration)
+    -- 移除该代理上旧的 tween
+    local i = 1
+    while i <= #levelSelectTweens_ do
+        if levelSelectTweens_[i].proxy == proxy then
+            table.remove(levelSelectTweens_, i)
+        else
+            i = i + 1
+        end
+    end
+    -- 新建 tween
+    local tw = tween.new(duration or 0.2, proxy, { scale = targetScale }, easing or "outBack")
+    table.insert(levelSelectTweens_, { tween = tw, proxy = proxy, widget = widget })
+end
+
 --- 从 JSON 加载关卡选择布局配置
 local function LoadLevelSelectConfig()
     local path = "Levels/level_select.json"
@@ -227,7 +265,11 @@ local function CreateLevelNode(index, unlocked, nodeSize, style)
         local bgColor = s.unlocked and s.unlocked.backgroundColor or DEFAULT_STYLE.unlocked.backgroundColor
         local bdColor = s.unlocked and s.unlocked.borderColor or DEFAULT_STYLE.unlocked.borderColor
         local txtColor = s.unlocked and s.unlocked.textColor or DEFAULT_STYLE.unlocked.textColor
-        return UI.Panel {
+
+        -- 动画代理对象
+        local proxy = { scale = 1.0 }
+
+        local node = UI.Panel {
             width = nodeSize, height = nodeSize,
             justifyContent = "center",
             alignItems = "center",
@@ -235,6 +277,23 @@ local function CreateLevelNode(index, unlocked, nodeSize, style)
             borderRadius = 6,
             borderWidth = 2,
             borderColor = bdColor,
+            scale = 1.0,
+            onPointerEnter = function(ev, self)
+                AnimateScale(self, proxy, 1.25, "outBack", 0.2)
+            end,
+            onPointerLeave = function(ev, self)
+                AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
+                -- 恢复颜色
+                self:SetProp("backgroundColor", bgColor)
+            end,
+            onPointerDown = function(ev, self)
+                AnimateScale(self, proxy, 0.85, "outQuart", 0.1)
+                self:SetProp("backgroundColor", { 120, 120, 120, 255 })
+            end,
+            onPointerUp = function(ev, self)
+                AnimateScale(self, proxy, 1.25, "outBack", 0.15)
+                self:SetProp("backgroundColor", bgColor)
+            end,
             onClick = function(self)
                 SceneManager.SwitchTo(SceneManager.SCENE_GAME, { level = index })
             end,
@@ -247,6 +306,7 @@ local function CreateLevelNode(index, unlocked, nodeSize, style)
                 },
             }
         }
+        return node
     else
         local bgColor = s.locked and s.locked.backgroundColor or DEFAULT_STYLE.locked.backgroundColor
         local bdColor = s.locked and s.locked.borderColor or DEFAULT_STYLE.locked.borderColor
@@ -524,9 +584,33 @@ function LevelSelectScene.Enter(params)
     }
 
     UI.SetRoot(root)
+
+    -- 注册 Update 事件驱动 tween 动画
+    SubscribeToEvent("Update", "LevelSelectScene_HandleUpdate")
+end
+
+function LevelSelectScene_HandleUpdate(eventType, eventData)
+    local dt = eventData["TimeStep"]:GetFloat()
+    local i = 1
+    while i <= #levelSelectTweens_ do
+        local entry = levelSelectTweens_[i]
+        local finished = entry.tween:update(dt)
+        -- 应用 scale 到 widget
+        if entry.widget and entry.proxy then
+            entry.widget:SetProp("scale", entry.proxy.scale)
+        end
+        if finished then
+            if entry.onComplete then entry.onComplete() end
+            table.remove(levelSelectTweens_, i)
+        else
+            i = i + 1
+        end
+    end
 end
 
 function LevelSelectScene.Exit()
+    UnsubscribeFromEvent("Update")
+    levelSelectTweens_ = {}
     UI.SetRoot(nil)
 end
 
