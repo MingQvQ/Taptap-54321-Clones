@@ -36,6 +36,19 @@ local EDITOR_SAVE_DIR = "LevelEditor"
 -- 内部工具函数
 -- ============================================================================
 
+--- 安全读取文件全部文本内容（兼容无 \0 终止符的纯文本文件）
+--- ReadString() 读取到 \0 终止符为止，对于外部创建的 JSON 文件（无终止符）
+--- 在部分平台上可能返回空字符串。改用 ReadLine() 逐行拼接保证兼容性。
+---@param file any Deserializer (File / MemoryBuffer returned by cache:GetFile)
+---@return string
+local function ReadFileText(file)
+    local lines = {}
+    while not file:IsEof() do
+        lines[#lines + 1] = file:ReadLine()
+    end
+    return table.concat(lines, "\n")
+end
+
 --- 将编辑器瓦片地图数据转换为游戏关卡格式
 ---@param tilemapRawData table TilemapData.Serialize() 产出的原始数据
 ---@param levelName string 关卡显示名称
@@ -55,20 +68,37 @@ local function ConvertTilemapToLevel(tilemapRawData, levelName)
     return levelData
 end
 
+--- 硬编码关卡文件路径映射（确保打包进安装包）
+local LEVEL_JSON_FILES = {
+    [1] = "Levels/level01.json",
+    [2] = "Levels/level02.json",
+    [3] = "Levels/level03.json",
+    [4] = "Levels/level04.json",
+    [5] = "Levels/level05.json",
+}
+
 --- 从静态 JSON 文件加载单个关卡
 ---@param index number 关卡索引（1开始）
 ---@return table|nil
 local function LoadLevelFromJSON(index)
-    local path = "Levels/level_" .. index .. ".json"
+    local path = LEVEL_JSON_FILES[index]
+    if not path then
+        return nil
+    end
     if not cache:Exists(path) then
+        print("[LevelData] File not found: " .. path)
         return nil
     end
     local file = cache:GetFile(path)
     if file == nil then
         return nil
     end
-    local content = file:ReadString()
+    local content = ReadFileText(file)
     file:Close()
+    if content == "" then
+        print("[LevelData] Empty content from: " .. path)
+        return nil
+    end
     local ok, data = pcall(cjson.decode, content)
     if not ok then
         log:Write(LOG_ERROR, "[LevelData] Failed to parse " .. path .. ": " .. tostring(data))
@@ -105,58 +135,23 @@ end
 -- ============================================================================
 
 --- 初始化：加载所有关卡
---- 优先级：编辑器关卡(本地缓存) > 静态 JSON > 云端异步更新
+--- 直接从素材库 JSON 文件加载，不再被云端/编辑器缓存覆盖
 function LevelData.Init()
     LevelData.Levels = {}
-    LevelData.cloudReady = false
+    LevelData.cloudReady = true  -- 不再依赖云端加载
 
-    -- 第一步：从本地文件缓存同步加载编辑器关卡（填充前3关）
-    local localLoaded = 0
-    for _, mapping in ipairs(CLOUD_LEVEL_MAP) do
-        local filename = mapping.key:gsub("^lvled_", "")
-        local tilemapData = LoadEditorLevelFromLocal(filename)
-        if tilemapData then
-            local levelData = ConvertTilemapToLevel(tilemapData, mapping.name)
-            if levelData then
-                LevelData.Levels[mapping.index] = levelData
-                localLoaded = localLoaded + 1
-                print("[LevelData] Slot " .. mapping.index .. " loaded from local: " .. filename)
-            end
-        end
-    end
-
-    -- 第二步：对于没有编辑器数据的槽位，用静态 JSON 填充
-    local index = 1
-    while true do
-        if LevelData.Levels[index] == nil then
-            local data = LoadLevelFromJSON(index)
-            if data == nil then
-                -- 如果之前的槽位有数据但当前没有，继续查找后面的
-                if index <= #CLOUD_LEVEL_MAP then
-                    index = index + 1
-                    goto continue
-                end
-                break
-            end
+    -- 从素材库 JSON 文件加载所有关卡（level01~05.json）
+    for index, path in pairs(LEVEL_JSON_FILES) do
+        local data = LoadLevelFromJSON(index)
+        if data then
             LevelData.Levels[index] = data
-        end
-        index = index + 1
-        ::continue::
-    end
-
-    -- 确保 Levels 是连续的序列（去除中间空洞）
-    local compacted = {}
-    for i = 1, #LevelData.Levels + 3 do
-        if LevelData.Levels[i] then
-            table.insert(compacted, LevelData.Levels[i])
+            print("[LevelData] Slot " .. index .. " loaded from JSON: " .. path)
+        else
+            print("[LevelData] WARNING: Failed to load " .. path)
         end
     end
-    LevelData.Levels = compacted
 
-    print("[LevelData] Initial load: " .. #LevelData.Levels .. " levels (" .. localLoaded .. " from editor cache)")
-
-    -- 第三步：异步从云端加载最新编辑器关卡（覆盖本地缓存版本）
-    LevelData.LoadCloudLevels()
+    print("[LevelData] Loaded " .. #LevelData.Levels .. " levels from assets")
 end
 
 --- 从 clientCloud 异步加载编辑器关卡，更新到对应槽位

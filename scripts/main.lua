@@ -104,8 +104,25 @@ function Start()
         scale = UI.Scale.DEFAULT,
     })
 
+    -- 全局白字黑描边：包装 UI.Label，自动注入 textStroke 和白色 fontColor
+    local _OrigLabel = UI.Label
+    UI.Label = function(props)
+        props = props or {}
+        if not props.textStroke then
+            props.textStroke = { width = 2, color = {0, 0, 0, 255} }
+        end
+        if not props.fontColor then
+            props.fontColor = {255, 255, 255, 255}
+        end
+        return _OrigLabel(props)
+    end
+
     -- 加载关卡数据
     LevelData.Init()
+
+    -- [临时] 从云端导出关卡到本地文件（预览一次后可删除）
+    local CloudExporter = require("CloudExporter")
+    CloudExporter.Run()
 
     -- 设置窗口标题
     graphics.windowTitle = Config.Title

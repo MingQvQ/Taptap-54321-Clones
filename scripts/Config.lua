@@ -7,7 +7,7 @@ local Config = {}
 
 -- 游戏基本信息
 Config.Title = "克隆小猪"
-Config.Version = "1.0.0"
+Config.Version = "1.1.5"
 
 -- 物理常量
 Config.Gravity = 20.0              -- 重力加速度
@@ -60,10 +60,13 @@ Config.CloneColors = {
     Config.Colors.Clone4,
 }
 
--- 音量设置（0.0 ~ 1.0）
+-- 运行时设置
 Config.Settings = {
-    MusicVolume = 0.4,
-    SFXVolume = 0.4,
+    MusicVolume = 0.4,       -- 音乐音量 0.0~1.0
+    SFXVolume = 0.4,         -- 音效音量 0.0~1.0
+    CameraZoom = 0.95,       -- 相机缩放 0.5~2.0（1.0=自动适配，<1放大，>1缩小看更多）
+    CameraOffsetX = 0.0,     -- 相机水平偏移 -5.0~5.0（单位：米）
+    CameraOffsetY = -3.6,    -- 相机垂直偏移 -5.0~5.0（单位：米）
 }
 
 return Config

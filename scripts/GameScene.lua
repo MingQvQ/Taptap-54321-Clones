@@ -12,6 +12,7 @@ local SceneManager = require("SceneManager")
 local ParallaxBackground = require("ParallaxBackground")
 local BGM = require("BGM")
 local UIScenes = require("UIScenes")
+require "urhox-libs.UI.VirtualControls"
 
 local GameScene = {}
 
@@ -88,6 +89,12 @@ local TUTORIAL_CLOUD_KEY = "tutorial_seen"
 local tutorialSeen_ = false  -- 是否已看过教程（从 clientCloud 加载）
 local tutorialUI_ = nil      -- 教程弹窗 UI 引用
 
+-- 虚拟触控按钮（移动端）
+local vcBtnLeft_ = nil
+local vcBtnRight_ = nil
+local vcBtnJump_ = nil
+local vcJumpTriggered_ = false
+
 -- 调试模式
 local debugMode_ = false
 -- 测试模式（可调重力）
@@ -132,6 +139,26 @@ local DEATH_FPS = 8              -- 死亡帧动画帧率
 -- ============================================================================
 -- 工具函数
 -- ============================================================================
+
+--- NanoVG 描边文字：先绘制黑色描边（8方向偏移），再绘制白色主体
+--- @param vg userdata NanoVG context
+--- @param x number 文字 x 坐标
+--- @param y number 文字 y 坐标
+--- @param text string 文字内容
+--- @param fillColor table|nil 主体颜色 {r,g,b,a}，默认白色
+--- @param strokeWidth number|nil 描边偏移像素，默认 1.5
+local function nvgTextOutlined(vg, x, y, text, fillColor, strokeWidth)
+    local sw = strokeWidth or 1.5
+    local fc = fillColor or {255, 255, 255, 255}
+    -- 黑色描边（8方向偏移）
+    nvgFillColor(vg, nvgRGBA(0, 0, 0, 220))
+    for _, off in ipairs({{-sw,0},{sw,0},{0,-sw},{0,sw},{-sw,-sw},{sw,-sw},{-sw,sw},{sw,sw}}) do
+        nvgText(vg, x + off[1], y + off[2], text)
+    end
+    -- 白色主体
+    nvgFillColor(vg, nvgRGBA(fc[1], fc[2], fc[3], fc[4]))
+    nvgText(vg, x, y, text)
+end
 
 --- 获取当前每物理单位对应的屏幕像素数（动态适配相机 orthoSize）
 local function GetPixelsPerUnit()
@@ -366,7 +393,7 @@ function GameScene.Enter(params)
         children = {
             UI.Panel {
                 position = "absolute",
-                top = 8, right = 8,
+                top = 8, left = 8,
                 children = {
                     UI.Button {
                         text = "⏸",
@@ -385,6 +412,56 @@ function GameScene.Enter(params)
         },
     }
     UI.SetRoot(hudUI_)
+
+    -- 创建虚拟触控按钮（移动端自动显示，桌面端有键盘绑定时自动隐藏）
+    -- 根据屏幕短边自适应按钮尺寸（基准: 短边720px时半径55/62）
+    local screenW = graphics:GetWidth()
+    local screenH = graphics:GetHeight()
+    local shortEdge = math.min(screenW, screenH)
+    local scaleFactor = shortEdge / 720
+    local btnRadius = math.floor(55 * scaleFactor)
+    local jumpRadius = math.floor(62 * scaleFactor)
+    local btnOffset = math.floor(100 * scaleFactor)
+    local btnGap = math.floor(130 * scaleFactor)
+    local bottomMargin = math.floor(100 * scaleFactor)
+
+    vcJumpTriggered_ = false
+    vcBtnLeft_ = VirtualControls.CreateButton({
+        label = "◀",
+        position = Vector2(btnOffset, -bottomMargin),
+        alignment = {HA_LEFT, VA_BOTTOM},
+        radius = btnRadius,
+        keyBinding = KEY_LEFT,
+        opacity = 0.45,
+        activeOpacity = 0.8,
+        color = {255, 255, 255},
+        pressedColor = {180, 220, 255},
+    })
+    vcBtnRight_ = VirtualControls.CreateButton({
+        label = "▶",
+        position = Vector2(btnOffset + btnGap, -bottomMargin),
+        alignment = {HA_LEFT, VA_BOTTOM},
+        radius = btnRadius,
+        keyBinding = KEY_RIGHT,
+        opacity = 0.45,
+        activeOpacity = 0.8,
+        color = {255, 255, 255},
+        pressedColor = {180, 220, 255},
+    })
+    vcBtnJump_ = VirtualControls.CreateButton({
+        label = "跳",
+        position = Vector2(-btnOffset, -bottomMargin),
+        alignment = {HA_RIGHT, VA_BOTTOM},
+        radius = jumpRadius,
+        keyBinding = KEY_SPACE,
+        opacity = 0.45,
+        activeOpacity = 0.8,
+        color = {255, 230, 150},
+        pressedColor = {255, 200, 100},
+        on_press = function()
+            vcJumpTriggered_ = true
+        end,
+    })
 
     -- 第一次进入第1关时检查是否需要显示教程
     if currentLevel_ == 1 and not fromEditor_ then
@@ -411,6 +488,13 @@ function GameScene.Enter(params)
 end
 
 function GameScene.Exit()
+    -- 清理虚拟触控按钮
+    VirtualControls.Shutdown()
+    vcBtnLeft_ = nil
+    vcBtnRight_ = nil
+    vcBtnJump_ = nil
+    vcJumpTriggered_ = false
+
     -- 清理暂停菜单和 HUD
     GameScene.HidePauseMenu()
     hudUI_ = nil
@@ -825,11 +909,6 @@ function GameScene.ApplyLevelData(levelData)
     local camY = minY - padding + camera.orthoSize / 2
     cameraNode_:SetPosition(Vector3(contentCX, camY, -10))
 
-    -- 如果关卡数据有显式相机位置，使用它覆盖
-    if levelData.camera then
-        cameraNode_:SetPosition(Vector3(levelData.camera.x, levelData.camera.y, -10))
-    end
-
     -- 保存出生点坐标
     spawnPos_.x = levelData.spawn.x
     spawnPos_.y = levelData.spawn.y
@@ -861,6 +940,12 @@ function GameScene_HandleUpdate(eventType, eventData)
     if input:GetKeyPress(KEY_T) then
         testMode_ = not testMode_
         print("[GameScene] Test mode: " .. tostring(testMode_))
+    end
+
+    -- M 切换移动端虚拟按钮显示（桌面调试用）
+    if input:GetKeyPress(KEY_M) then
+        local isMobile = VirtualControls.IsMobileMode()
+        VirtualControls.SetMobileMode(not isMobile)
     end
 
     -- 测试模式：数字键调节重力系数
@@ -977,8 +1062,12 @@ function GameScene.UpdatePlaying(dt)
     -- 读取输入（玩家已生成后才响应）
     if mainPlayer_ and mainPlayer_.isAlive then
         local leftHeld = input:GetKeyDown(KEY_LEFT) or input:GetKeyDown(KEY_A)
+            or (vcBtnLeft_ and vcBtnLeft_.isPressed)
         local rightHeld = input:GetKeyDown(KEY_RIGHT) or input:GetKeyDown(KEY_D)
+            or (vcBtnRight_ and vcBtnRight_.isPressed)
         local jumpPressed = input:GetKeyPress(KEY_SPACE) or input:GetKeyPress(KEY_UP) or input:GetKeyPress(KEY_W)
+            or vcJumpTriggered_
+        vcJumpTriggered_ = false
         mainPlayer_:UpdateInput(dt, leftHeld, rightHeld, jumpPressed)
     end
 
@@ -1207,10 +1296,13 @@ function GameScene_HandleRender(eventType, eventData)
         local aspect = screenW_ / screenH_
         local neededH = mapGridH_
         local neededW = mapGridW_ / aspect
-        camera.orthoSize = math.max(neededH, neededW)
-        -- 相机居中于内容，底边对齐内容底边，向上偏移
-        local camY = contentMinY_ + camera.orthoSize / 2 - 3.0
-        cameraNode_:SetPosition(Vector3(contentCenterX_, camY, -10))
+        local baseOrtho = math.max(neededH, neededW)
+        -- 应用用户缩放设置（CameraZoom: 1.0=默认, <1=放大近, >1=缩小远）
+        camera.orthoSize = baseOrtho * (Config.Settings.CameraZoom or 1.0)
+        -- 相机位置：内容底边对齐视野底边，水平居中 + 用户偏移
+        local camX = contentCenterX_ + (Config.Settings.CameraOffsetX or 0)
+        local camY = contentMinY_ + camera.orthoSize / 2 + (Config.Settings.CameraOffsetY or 0)
+        cameraNode_:SetPosition(Vector3(camX, camY, -10))
     end
 
     nvgBeginFrame(nvg_, screenW_, screenH_, dpr)
@@ -1463,13 +1555,13 @@ function GameScene.DrawDecorations()
 end
 
 function GameScene.DrawHUD()
-    -- 左上角像素风 HUD 面板
+    -- 右上角像素风 HUD 面板
     local margin = 10
-    local px = margin
+    local panelW = 140
+    local px = screenW_ - panelW - margin
     local py = margin
     local rowH = 24       -- 每行高度
     local iconSz = 20     -- 图标大小
-    local panelW = 140
     local panelH = rowH * 3 + 12  -- 3行内容 + padding
 
     -- 面板背景
@@ -1503,10 +1595,8 @@ function GameScene.DrawHUD()
             totalPigs = totalPigs + 1 + #cloneSystem_:GetClones()
         end
     end
-    nvgFillColor(nvg_, nvgRGBA(255, 180, 200, 255))
-    nvgText(nvg_, contentX, contentY, "🐷")
-    nvgFillColor(nvg_, nvgRGBA(240, 240, 240, 255))
-    nvgText(nvg_, contentX + iconSz + 4, contentY, reached .. "/" .. goalTarget_ .. " 目标")
+    nvgTextOutlined(nvg_, contentX, contentY, "🐷", {255, 180, 200, 255})
+    nvgTextOutlined(nvg_, contentX + iconSz + 4, contentY, reached .. "/" .. goalTarget_ .. " 目标", {255, 255, 255, 255})
 
     -- 第2行：计时器倒计时
     contentY = contentY + rowH
@@ -1514,13 +1604,11 @@ function GameScene.DrawHUD()
     if cloneSystem_ and cloneSystem_:IsActive() then
         timerNum = cloneSystem_:GetCurrentNumber()
     end
-    nvgFillColor(nvg_, nvgRGBA(80, 200, 240, 255))
-    nvgText(nvg_, contentX, contentY, "⏳")
-    nvgFillColor(nvg_, nvgRGBA(240, 240, 240, 255))
+    nvgTextOutlined(nvg_, contentX, contentY, "⏳", {80, 200, 240, 255})
     if timerNum > 0 then
-        nvgText(nvg_, contentX + iconSz + 4, contentY, "×" .. timerNum .. " 待出发")
+        nvgTextOutlined(nvg_, contentX + iconSz + 4, contentY, "×" .. timerNum .. " 待出发", {255, 255, 255, 255})
     else
-        nvgText(nvg_, contentX + iconSz + 4, contentY, "全部出发")
+        nvgTextOutlined(nvg_, contentX + iconSz + 4, contentY, "全部出发", {255, 255, 255, 255})
     end
 
     -- 第3行：金币
@@ -1534,11 +1622,9 @@ function GameScene.DrawHUD()
         nvgFillPaint(nvg_, imgPat)
         nvgFill(nvg_)
     else
-        nvgFillColor(nvg_, nvgRGBA(255, 215, 0, 255))
-        nvgText(nvg_, contentX, contentY, "🪙")
+        nvgTextOutlined(nvg_, contentX, contentY, "🪙", {255, 215, 0, 255})
     end
-    nvgFillColor(nvg_, nvgRGBA(255, 215, 0, 240))
-    nvgText(nvg_, contentX + iconSz + 4, contentY, "×" .. totalCoins_)
+    nvgTextOutlined(nvg_, contentX + iconSz + 4, contentY, "×" .. totalCoins_, {255, 215, 0, 240})
 end
 
 function GameScene.DrawGoal()
@@ -1583,8 +1669,7 @@ function GameScene.DrawGoal()
             nvgFontFace(nvg_, "sans")
             nvgFontSize(nvg_, 12)
             nvgTextAlign(nvg_, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
-            nvgFillColor(nvg_, nvgRGBA(255, 255, 255, 230))
-            nvgText(nvg_, sx, sy + drawH/2 + 10, "×" .. goal.acceptCount)
+            nvgTextOutlined(nvg_, sx, sy + drawH/2 + 10, "×" .. goal.acceptCount, {255, 255, 255, 230})
         end
     end
 end
@@ -1696,8 +1781,7 @@ function GameScene.DrawTimerUI()
     nvgFontFace(nvg_, "sans")
     nvgFontSize(nvg_, tileSize * 0.55)
     nvgTextAlign(nvg_, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
-    nvgFillColor(nvg_, nvgRGBA(255, 255, 255, 255))
-    nvgText(nvg_, cx, cy, tostring(num))
+    nvgTextOutlined(nvg_, cx, cy, tostring(num), {255, 255, 255, 255}, 2)
 end
 
 -- ============================================================================
@@ -1718,20 +1802,16 @@ function GameScene.DrawGameState()
 
     if gameState_ == STATE_WIN then
         nvgFontSize(nvg_, 48)
-        nvgFillColor(nvg_, nvgRGBA(255, 215, 0, 255))
-        nvgText(nvg_, screenW_ / 2, screenH_ / 2 - 20, "通关成功!")
+        nvgTextOutlined(nvg_, screenW_ / 2, screenH_ / 2 - 20, "通关成功!", {255, 215, 0, 255}, 2.5)
 
         nvgFontSize(nvg_, 18)
-        nvgFillColor(nvg_, nvgRGBA(200, 200, 200, 200))
-        nvgText(nvg_, screenW_ / 2, screenH_ / 2 + 30, "即将返回关卡选择...")
+        nvgTextOutlined(nvg_, screenW_ / 2, screenH_ / 2 + 30, "即将返回关卡选择...", {255, 255, 255, 200})
     else
         nvgFontSize(nvg_, 48)
-        nvgFillColor(nvg_, nvgRGBA(220, 60, 60, 255))
-        nvgText(nvg_, screenW_ / 2, screenH_ / 2 - 20, "挑战失败")
+        nvgTextOutlined(nvg_, screenW_ / 2, screenH_ / 2 - 20, "挑战失败", {255, 80, 80, 255}, 2.5)
 
         nvgFontSize(nvg_, 18)
-        nvgFillColor(nvg_, nvgRGBA(200, 200, 200, 200))
-        nvgText(nvg_, screenW_ / 2, screenH_ / 2 + 30, "即将重新开始...")
+        nvgTextOutlined(nvg_, screenW_ / 2, screenH_ / 2 + 30, "即将重新开始...", {255, 255, 255, 200})
     end
 end
 
@@ -1796,7 +1876,7 @@ end
 -- 教程/帮助弹窗
 -- ============================================================================
 
-function GameScene.ShowTutorial()
+function GameScene.ShowTutorial(fromPause)
     gameState_ = STATE_PAUSED
     tutorialUI_ = UI.Panel {
         width = "100%",
@@ -1831,7 +1911,7 @@ function GameScene.ShowTutorial()
                         width = "100%",
                     },
                     UI.Button {
-                        text = "我已经知道了！！！",
+                        text = fromPause and "返回" or "我已经知道了！！！",
                         width = "80%", maxWidth = 180,
                         height = 64,
                         backgroundImage = WOODEN_BTN.image,
@@ -1846,7 +1926,11 @@ function GameScene.ShowTutorial()
                         marginTop = 4,
                         onClick = function(self)
                             UIScenes.PlayUIClick()
-                            GameScene.HideTutorial()
+                            if fromPause then
+                                GameScene.ShowPauseMenu()
+                            else
+                                GameScene.HideTutorial()
+                            end
                         end,
                     },
                 },
@@ -1908,8 +1992,7 @@ function GameScene.ShowPauseMenu()
         borderWidth = 0,
         onClick = function(self)
             UIScenes.PlayUIClick()
-            GameScene.HidePauseMenu()
-            GameScene.ShowTutorial()
+            GameScene.ShowTutorial(true)  -- fromPause=true
         end,
     }
     buttons[#buttons + 1] = UI.Button {
@@ -1973,54 +2056,46 @@ function GameScene.ShowPauseMenu()
         end,
     }
 
-    -- 音量区域
-    local volumePanel = UI.Panel {
-        width = "100%",
-        gap = 6,
-        padding = 10,
-        backgroundColor = { 25, 28, 40, 200 },
-        borderRadius = 8,
-        children = {
-            UI.Label {
-                text = "音效设置",
-                fontSize = 12,
-                fontColor = { 180, 190, 210, 220 },
-                marginBottom = 2,
-            },
-            UI.Panel {
-                width = "100%",
-                flexDirection = "row",
-                alignItems = "center",
-                gap = 6,
-                children = {
-                    UI.Label { text = "音乐", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
-                    UI.Slider {
-                        value = Config.Settings.MusicVolume * 100,
-                        min = 0, max = 100,
-                        flexGrow = 1,
-                        onChange = function(self, val) BGM.SetVolume(val / 100) end,
-                    },
-                }
-            },
-            UI.Panel {
-                width = "100%",
-                flexDirection = "row",
-                alignItems = "center",
-                gap = 6,
-                children = {
-                    UI.Label { text = "音效", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
-                    UI.Slider {
-                        value = Config.Settings.SFXVolume * 100,
-                        min = 0, max = 100,
-                        flexGrow = 1,
-                        onChange = function(self, val) Config.Settings.SFXVolume = val / 100 end,
-                    },
-                }
-            },
-        }
+    -- 音效设置按钮
+    buttons[#buttons + 1] = UI.Button {
+        text = "音效设置",
+        width = "80%", maxWidth = 150,
+        height = 72,
+        backgroundImage = WOODEN_BTN.image,
+        backgroundFit = WOODEN_BTN.fit,
+        backgroundSlice = WOODEN_BTN.slice,
+        backgroundColor = WOODEN_BTN.bgColor,
+        boxShadow = WOODEN_BTN.shadow,
+        fontColor = WOODEN_BTN.textColor,
+        fontWeight = WOODEN_BTN.fontWeight,
+        fontSize = 11,
+        borderWidth = 0,
+        onClick = function(self)
+            UIScenes.PlayUIClick()
+            GameScene.ShowAudioSettingsPanel()
+        end,
+    }
+    -- 镜头设置按钮
+    buttons[#buttons + 1] = UI.Button {
+        text = "镜头设置",
+        width = "80%", maxWidth = 150,
+        height = 72,
+        backgroundImage = WOODEN_BTN.image,
+        backgroundFit = WOODEN_BTN.fit,
+        backgroundSlice = WOODEN_BTN.slice,
+        backgroundColor = WOODEN_BTN.bgColor,
+        boxShadow = WOODEN_BTN.shadow,
+        fontColor = WOODEN_BTN.textColor,
+        fontWeight = WOODEN_BTN.fontWeight,
+        fontSize = 11,
+        borderWidth = 0,
+        onClick = function(self)
+            UIScenes.PlayUIClick()
+            GameScene.ShowCameraSettingsPanel()
+        end,
     }
 
-    -- 合并 children: 标题 + 按钮[1] + 音量 + 按钮[2..n]
+    -- 合并 children: 标题 + 所有按钮
     local panelChildren = {}
     panelChildren[#panelChildren + 1] = UI.Label {
         text = "暂停",
@@ -2028,9 +2103,7 @@ function GameScene.ShowPauseMenu()
         fontColor = { 255, 255, 255, 255 },
         marginBottom = 2,
     }
-    panelChildren[#panelChildren + 1] = buttons[1]  -- 返回游戏
-    panelChildren[#panelChildren + 1] = volumePanel
-    for i = 2, #buttons do
+    for i = 1, #buttons do
         panelChildren[#panelChildren + 1] = buttons[i]
     end
 
@@ -2044,6 +2117,7 @@ function GameScene.ShowPauseMenu()
             UI.Panel {
                 width = "85%",
                 maxWidth = 320,
+                maxHeight = "90%",
                 padding = 16,
                 gap = 8,
                 alignItems = "center",
@@ -2051,6 +2125,7 @@ function GameScene.ShowPauseMenu()
                 borderRadius = 14,
                 borderWidth = 2,
                 borderColor = { 80, 140, 255, 100 },
+                overflow = "scroll",
                 children = panelChildren,
             }
         }
@@ -2062,6 +2137,226 @@ end
 function GameScene.HidePauseMenu()
     UI.SetRoot(hudUI_)
     pauseUI_ = nil
+end
+
+--- 音效设置子面板
+function GameScene.ShowAudioSettingsPanel()
+    local audioUI = UI.Panel {
+        width = "100%",
+        height = "100%",
+        justifyContent = "center",
+        alignItems = "center",
+        backgroundColor = { 0, 0, 0, 150 },
+        children = {
+            UI.Panel {
+                width = "85%",
+                maxWidth = 320,
+                padding = 16,
+                gap = 10,
+                alignItems = "center",
+                backgroundColor = { 35, 40, 58, 245 },
+                borderRadius = 14,
+                borderWidth = 2,
+                borderColor = { 80, 140, 255, 100 },
+                children = {
+                    UI.Label {
+                        text = "音效设置",
+                        fontSize = 18,
+                        fontColor = { 255, 255, 255, 255 },
+                        marginBottom = 4,
+                    },
+                    UI.Panel {
+                        width = "100%",
+                        gap = 8,
+                        padding = 10,
+                        backgroundColor = { 25, 28, 40, 200 },
+                        borderRadius = 8,
+                        children = {
+                            UI.Panel {
+                                width = "100%",
+                                flexDirection = "row",
+                                alignItems = "center",
+                                gap = 6,
+                                children = {
+                                    UI.Label { text = "音乐", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
+                                    UI.Slider {
+                                        value = Config.Settings.MusicVolume * 100,
+                                        min = 0, max = 100,
+                                        flexGrow = 1,
+                                        onChange = function(self, val) BGM.SetVolume(val / 100) end,
+                                    },
+                                }
+                            },
+                            UI.Panel {
+                                width = "100%",
+                                flexDirection = "row",
+                                alignItems = "center",
+                                gap = 6,
+                                children = {
+                                    UI.Label { text = "音效", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
+                                    UI.Slider {
+                                        value = Config.Settings.SFXVolume * 100,
+                                        min = 0, max = 100,
+                                        flexGrow = 1,
+                                        onChange = function(self, val) Config.Settings.SFXVolume = val / 100 end,
+                                    },
+                                }
+                            },
+                        }
+                    },
+                    UI.Button {
+                        text = "返回",
+                        width = "80%", maxWidth = 150,
+                        height = 72,
+                        backgroundImage = WOODEN_BTN.image,
+                        backgroundFit = WOODEN_BTN.fit,
+                        backgroundSlice = WOODEN_BTN.slice,
+                        backgroundColor = WOODEN_BTN.bgColor,
+                        boxShadow = WOODEN_BTN.shadow,
+                        fontColor = WOODEN_BTN.textColor,
+                        fontWeight = WOODEN_BTN.fontWeight,
+                        fontSize = 11,
+                        borderWidth = 0,
+                        onClick = function(self)
+                            UIScenes.PlayUIClick()
+                            GameScene.ShowPauseMenu()
+                        end,
+                    },
+                }
+            }
+        }
+    }
+    UI.SetRoot(audioUI)
+end
+
+--- 镜头设置子面板
+function GameScene.ShowCameraSettingsPanel()
+    local zoomValLabel = UI.Label {
+        text = string.format("%.0f%%", Config.Settings.CameraZoom * 100),
+        fontSize = 10, fontColor = { 100, 220, 200, 255 }, width = 36, textAlign = "right",
+    }
+    local offsetXValLabel = UI.Label {
+        text = string.format("%.1f", Config.Settings.CameraOffsetX),
+        fontSize = 10, fontColor = { 100, 220, 200, 255 }, width = 36, textAlign = "right",
+    }
+    local offsetYValLabel = UI.Label {
+        text = string.format("%.1f", Config.Settings.CameraOffsetY),
+        fontSize = 10, fontColor = { 100, 220, 200, 255 }, width = 36, textAlign = "right",
+    }
+
+    local cameraUI = UI.Panel {
+        width = "100%",
+        height = "100%",
+        justifyContent = "center",
+        alignItems = "center",
+        backgroundColor = { 0, 0, 0, 150 },
+        children = {
+            UI.Panel {
+                width = "85%",
+                maxWidth = 320,
+                padding = 16,
+                gap = 10,
+                alignItems = "center",
+                backgroundColor = { 35, 40, 58, 245 },
+                borderRadius = 14,
+                borderWidth = 2,
+                borderColor = { 80, 140, 255, 100 },
+                children = {
+                    UI.Label {
+                        text = "镜头设置",
+                        fontSize = 18,
+                        fontColor = { 255, 255, 255, 255 },
+                        marginBottom = 4,
+                    },
+                    UI.Panel {
+                        width = "100%",
+                        gap = 8,
+                        padding = 10,
+                        backgroundColor = { 25, 28, 40, 200 },
+                        borderRadius = 8,
+                        children = {
+                            UI.Panel {
+                                width = "100%",
+                                flexDirection = "row",
+                                alignItems = "center",
+                                gap = 6,
+                                children = {
+                                    UI.Label { text = "大小", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
+                                    UI.Slider {
+                                        value = Config.Settings.CameraZoom * 100,
+                                        min = 50, max = 200,
+                                        flexGrow = 1,
+                                        onChange = function(self, val)
+                                            Config.Settings.CameraZoom = val / 100
+                                            zoomValLabel:SetText(string.format("%.0f%%", val))
+                                        end,
+                                    },
+                                    zoomValLabel,
+                                }
+                            },
+                            UI.Panel {
+                                width = "100%",
+                                flexDirection = "row",
+                                alignItems = "center",
+                                gap = 6,
+                                children = {
+                                    UI.Label { text = "水平", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
+                                    UI.Slider {
+                                        value = (Config.Settings.CameraOffsetX + 5) * 10,
+                                        min = 0, max = 100,
+                                        flexGrow = 1,
+                                        onChange = function(self, val)
+                                            Config.Settings.CameraOffsetX = val / 10 - 5
+                                            offsetXValLabel:SetText(string.format("%.1f", val / 10 - 5))
+                                        end,
+                                    },
+                                    offsetXValLabel,
+                                }
+                            },
+                            UI.Panel {
+                                width = "100%",
+                                flexDirection = "row",
+                                alignItems = "center",
+                                gap = 6,
+                                children = {
+                                    UI.Label { text = "垂直", fontSize = 11, fontColor = { 160, 170, 190, 200 }, width = 32 },
+                                    UI.Slider {
+                                        value = (Config.Settings.CameraOffsetY + 5) * 10,
+                                        min = 0, max = 100,
+                                        flexGrow = 1,
+                                        onChange = function(self, val)
+                                            Config.Settings.CameraOffsetY = val / 10 - 5
+                                            offsetYValLabel:SetText(string.format("%.1f", val / 10 - 5))
+                                        end,
+                                    },
+                                    offsetYValLabel,
+                                }
+                            },
+                        }
+                    },
+                    UI.Button {
+                        text = "返回",
+                        width = "80%", maxWidth = 150,
+                        height = 72,
+                        backgroundImage = WOODEN_BTN.image,
+                        backgroundFit = WOODEN_BTN.fit,
+                        backgroundSlice = WOODEN_BTN.slice,
+                        backgroundColor = WOODEN_BTN.bgColor,
+                        boxShadow = WOODEN_BTN.shadow,
+                        fontColor = WOODEN_BTN.textColor,
+                        fontWeight = WOODEN_BTN.fontWeight,
+                        fontSize = 11,
+                        borderWidth = 0,
+                        onClick = function(self)
+                            UIScenes.PlayUIClick()
+                            GameScene.ShowPauseMenu()
+                        end,
+                    },
+                }
+            }
+        }
+    }
+    UI.SetRoot(cameraUI)
 end
 
 -- ============================================================================

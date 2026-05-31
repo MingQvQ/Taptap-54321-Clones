@@ -1,0 +1,14 @@
+{
+    "name": "初次试炼",
+    "camera": { "x": 0, "y": 3 },
+    "spawn": { "x": -5, "y": 1 },
+    "goal": { "x": 5, "y": 4.5, "width": 1.2, "height": 1.8 },
+    "platforms": [
+        { "x": -5, "y": -0.3, "width": 3, "height": 0.5 },
+        { "x": -2, "y": 0.8, "width": 2.5, "height": 0.5 },
+        { "x": 0.5, "y": 1.8, "width": 2.5, "height": 0.5 },
+        { "x": 3, "y": 2.8, "width": 2, "height": 0.5 },
+        { "x": 5, "y": 3.8, "width": 2.5, "height": 0.5 }
+    ],
+    "spikes": []
+}

@@ -1,0 +1,2 @@
+-- 此文件已废弃，clientCloud 在 tool_mode 下不可用
+-- 云端关卡需通过游戏内导出

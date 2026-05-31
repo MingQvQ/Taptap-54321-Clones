@@ -342,6 +342,17 @@ end
 local LevelSelectScene = {}
 
 --- 从 JSON 加载关卡选择布局配置
+--- 安全读取文件全部文本内容（兼容无 \0 终止符的纯文本文件）
+---@param file any Deserializer
+---@return string
+local function ReadFileText(file)
+    local lines = {}
+    while not file:IsEof() do
+        lines[#lines + 1] = file:ReadLine()
+    end
+    return table.concat(lines, "\n")
+end
+
 local function LoadLevelSelectConfig()
     local path = "Levels/level_select.json"
     if not cache:Exists(path) then
@@ -350,8 +361,9 @@ local function LoadLevelSelectConfig()
     end
     local file = cache:GetFile(path)
     if not file then return nil end
-    local content = file:ReadString()
+    local content = ReadFileText(file)
     file:Close()
+    if content == "" then return nil end
     local ok, data = pcall(cjson.decode, content)
     if not ok then
         log:Write(LOG_ERROR, "UIScenes: Failed to parse level_select.json: " .. tostring(data))
