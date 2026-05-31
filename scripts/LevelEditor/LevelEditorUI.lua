@@ -88,6 +88,7 @@ local assetPickerOverlay_ = nil
 local assetListPanel_ = nil
 local deleteOverlay_ = nil
 local deleteListPanel_ = nil
+
 local arrangeModeBtn_ = nil
 
 --- 判断是否有任何弹窗/遮罩处于可见状态（用于阻断底层射线/点击）
@@ -97,6 +98,7 @@ local function IsAnyOverlayVisible()
     if loadOverlay_ and loadOverlay_:IsVisible() then return true end
     if assetPickerOverlay_ and assetPickerOverlay_:IsVisible() then return true end
     if deleteOverlay_ and deleteOverlay_:IsVisible() then return true end
+
     if exitConfirmOverlay_ and exitConfirmOverlay_:IsVisible() then return true end
     return false
 end
@@ -465,6 +467,51 @@ end
 local function HideDeleteDialog()
     if deleteOverlay_ then deleteOverlay_:SetVisible(false) end
     uiCooldownTimer_ = UI_COOLDOWN_DURATION
+end
+
+--- 导出当前关卡为 JSON 文件，保存到沙箱 data/ 目录
+local function ExportLevelToFile()
+    -- 获取当前关卡数据
+    local valid, errMsg = EditorTestBridge.Validate()
+    local jsonStr = ""
+    if valid then
+        local levelData = EditorTestBridge.ConvertToLevelData()
+        jsonStr = cjson.encode(levelData)
+    else
+        local rawData = TilemapData.Serialize()
+        jsonStr = cjson.encode(rawData)
+    end
+
+    -- 确保 data/ 目录存在
+    fileSystem:CreateDir("data")
+
+    -- 找到下一个可用编号
+    local num = 1
+    while true do
+        local fname = string.format("data/testlevel%02d.json", num)
+        if not fileSystem:FileExists(fname) then
+            break
+        end
+        num = num + 1
+    end
+
+    local filename = string.format("data/testlevel%02d.json", num)
+
+    -- 写入文件
+    local f = File:new(filename, FILE_WRITE)
+    if f then
+        f:WriteString(jsonStr)
+        f:Close()
+        f:delete()
+        print("[LevelEditor] Export saved: " .. filename)
+    else
+        print("[LevelEditor] Export FAILED: cannot write " .. filename)
+    end
+
+    -- 同时打印到日志便于外部读取
+    print("EXPORT_JSON_START|" .. filename .. "|")
+    print(jsonStr)
+    print("EXPORT_JSON_END|" .. filename .. "|")
 end
 
 --- 获取文件大小（不存在或无法打开返回 0）
@@ -1690,6 +1737,10 @@ function LevelEditorUI.BuildUI()
                 onClick = function(self) LevelEditorUI.LaunchTest() end,
             },
             UI.Button {
+                text = "📋 输出", variant = "outline", height = 34,
+                onClick = function(self) ExportLevelToFile() end,
+            },
+            UI.Button {
                 text = "← 返回", variant = "ghost", height = 34,
                 onClick = function(self)
                     if dirty_ then
@@ -1982,6 +2033,8 @@ function LevelEditorUI.BuildUI()
             },
         },
     }
+
+
 
     -- === 退出确认弹框 ===
     exitConfirmOverlay_ = UI.Panel {
