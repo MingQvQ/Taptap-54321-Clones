@@ -12,10 +12,10 @@ local TilemapData = {}
 
 TilemapData.tileRegistry = {
     [0] = { id = 0, name = "空", image = nil, color = { 0, 0, 0, 0 } },
-    [1] = { id = 1, name = "草地", image = nil, color = { 80, 180, 80, 255 } },
-    [2] = { id = 2, name = "泥土", image = nil, color = { 140, 90, 50, 255 } },
-    [3] = { id = 3, name = "石头", image = nil, color = { 120, 125, 135, 255 } },
-    [4] = { id = 4, name = "木板", image = nil, color = { 160, 120, 60, 255 } },
+    [1] = { id = 1, name = "草地", image = nil, color = { 80, 180, 80, 255 }, group = "basic" },
+    [2] = { id = 2, name = "泥土", image = nil, color = { 140, 90, 50, 255 }, group = "basic" },
+    [3] = { id = 3, name = "石头", image = nil, color = { 120, 125, 135, 255 }, group = "basic" },
+    [4] = { id = 4, name = "木板", image = nil, color = { 160, 120, 60, 255 }, group = "basic" },
 }
 
 -- 预注册瓦片素材（softy_sand + tilemap_tiles）
@@ -139,12 +139,21 @@ TilemapData.nextTileId = nextId
 TilemapData.prefabRegistry = {
     [0] = { id = 0, name = "空", tag = "", icon = "", color = { 0, 0, 0, 0 } },
     [1] = { id = 1, name = "玩家出生点", tag = "player_spawn", icon = "", color = { 80, 160, 255, 200 }, playerCount = 5 },
-    [2] = { id = 2, name = "终点", tag = "goal", icon = "🚪", color = { 255, 215, 0, 200 } },
+    [2] = { id = 2, name = "终点", tag = "goal", icon = "🚪", color = { 255, 215, 0, 200 }, acceptCount = 1 },
     [3] = { id = 3, name = "尖刺", tag = "spike", icon = "🔺", color = { 220, 50, 50, 200 } },
     [4] = { id = 4, name = "金币", tag = "coin", icon = "🟡", color = { 255, 200, 0, 200 } },
     [5] = { id = 5, name = "移动平台", tag = "moving_platform", icon = "↔️", color = { 100, 180, 220, 200 } },
+    -- 飞行敌人
+    [12] = { id = 12, name = "海鸥", tag = "seagull", icon = "🐦", color = { 180, 220, 255, 200 }, range = 3.0, speed = 2.0 },
+    -- 装饰预制体（纯视觉，无碰撞无交互）
+    [6]  = { id = 6,  name = "棕榈树1", tag = "decoration", icon = "🌴", color = { 60, 180, 80, 200 }, image = "image/Prop/vegetation_tree_palm1.png" },
+    [7]  = { id = 7,  name = "棕榈树2", tag = "decoration", icon = "🌴", color = { 60, 180, 80, 200 }, image = "image/Prop/vegetation_tree_palm2.png" },
+    [8]  = { id = 8,  name = "棕榈树3", tag = "decoration", icon = "🌴", color = { 60, 180, 80, 200 }, image = "image/Prop/vegetation_tree_palm3.png" },
+    [9]  = { id = 9,  name = "棕榈树4", tag = "decoration", icon = "🌴", color = { 60, 180, 80, 200 }, image = "image/Prop/vegetation_tree_palm4.png" },
+    [10] = { id = 10, name = "棕榈树5", tag = "decoration", icon = "🌴", color = { 60, 180, 80, 200 }, image = "image/Prop/vegetation_tree_palm5.png" },
+    [11] = { id = 11, name = "棕榈树6", tag = "decoration", icon = "🌴", color = { 60, 180, 80, 200 }, image = "image/Prop/vegetation_tree_palm6.png" },
 }
-TilemapData.nextPrefabId = 6
+TilemapData.nextPrefabId = 13
 
 -- ============================================================================
 -- 多图层系统
@@ -157,11 +166,17 @@ TilemapData.MAX_LAYERS = 5
 TilemapData.gridWidth = 16
 TilemapData.gridHeight = 12
 
---- 图层列表: { { id, name, type, zOrder, visible, data } }
+--- 图层列表: { { id, name, type, layerKind, zOrder, visible, data } }
 --- type: "tile" 或 "prefab"
+--- layerKind: "terrain"(地形层,有碰撞) / "environment"(环境层,无碰撞) / "prefab"(预制体层)
 --- zOrder: 渲染层级，数字越大渲染越靠后（覆盖前面的）
 --- data: [row][col] = id
 TilemapData.layers = {}
+
+--- 图层类型常量
+TilemapData.LAYER_KIND_TERRAIN = "terrain"       -- 地形层（有碰撞）
+TilemapData.LAYER_KIND_ENVIRONMENT = "environment" -- 环境层（无碰撞，纯装饰）
+TilemapData.LAYER_KIND_PREFAB = "prefab"         -- 预制体层
 
 --- 下一个图层唯一ID（递增，不复用）
 local nextLayerUid_ = 1
@@ -257,12 +272,22 @@ local function CreateEmptyGrid(w, h)
     return grid
 end
 
+--- 创建一个空白旋转数据网格（nil 表示无旋转，0/90/180/270 表示角度）
+local function CreateEmptyRotationGrid(w, h)
+    local grid = {}
+    for row = 1, h do
+        grid[row] = {}
+    end
+    return grid
+end
+
 --- 新建图层
 ---@param name string 图层名称
 ---@param layerType string "tile" 或 "prefab"
 ---@param zOrder? number 渲染层级（默认自动递增）
+---@param layerKind? string "terrain"/"environment"/"prefab"（默认按 type 推断）
 ---@return number|nil 新图层在 layers 中的索引，超出上限返回 nil
-function TilemapData.AddLayer(name, layerType, zOrder)
+function TilemapData.AddLayer(name, layerType, zOrder, layerKind)
     if #TilemapData.layers >= TilemapData.MAX_LAYERS then
         return nil
     end
@@ -277,13 +302,24 @@ function TilemapData.AddLayer(name, layerType, zOrder)
         end
     end
 
+    -- 默认 layerKind: tile→terrain, prefab→prefab
+    if not layerKind then
+        if layerType == "prefab" then
+            layerKind = TilemapData.LAYER_KIND_PREFAB
+        else
+            layerKind = TilemapData.LAYER_KIND_TERRAIN
+        end
+    end
+
     local layer = {
         id = uid,
         name = name or ("图层" .. uid),
         type = layerType or "tile",
+        layerKind = layerKind,
         zOrder = zOrder,
         visible = true,
         data = CreateEmptyGrid(TilemapData.gridWidth, TilemapData.gridHeight),
+        rotationData = CreateEmptyRotationGrid(TilemapData.gridWidth, TilemapData.gridHeight),
     }
     table.insert(TilemapData.layers, layer)
     return #TilemapData.layers
@@ -341,6 +377,22 @@ function TilemapData.SetLayerVisible(index, visible)
     local layer = TilemapData.layers[index]
     if layer then
         layer.visible = visible
+    end
+end
+
+--- 设置图层种类
+---@param index number
+---@param kind string "terrain"/"environment"/"prefab"
+function TilemapData.SetLayerKind(index, kind)
+    local layer = TilemapData.layers[index]
+    if layer then
+        layer.layerKind = kind
+        -- 同步 type: environment/terrain 都是 tile 类型
+        if kind == TilemapData.LAYER_KIND_PREFAB then
+            layer.type = "prefab"
+        else
+            layer.type = "tile"
+        end
     end
 end
 
@@ -410,9 +462,9 @@ function TilemapData.New(width, height)
     nextLayerUid_ = 1
     TilemapData.ClearUndo()
 
-    -- 默认创建一个瓦片层和一个预制体层
-    TilemapData.AddLayer("地形", "tile", 0)
-    TilemapData.AddLayer("预制体", "prefab", 1)
+    -- 默认创建地形层和预制体层
+    TilemapData.AddLayer("地形", "tile", 0, TilemapData.LAYER_KIND_TERRAIN)
+    TilemapData.AddLayer("预制体", "prefab", 1, TilemapData.LAYER_KIND_PREFAB)
     TilemapData.activeLayerIndex = 1
 end
 
@@ -428,12 +480,18 @@ function TilemapData.Resize(newWidth, newHeight)
 
     for _, layer in ipairs(TilemapData.layers) do
         local oldData = layer.data
+        local oldRotation = layer.rotationData
         layer.data = {}
+        layer.rotationData = {}
         for row = 1, newHeight do
             layer.data[row] = {}
+            layer.rotationData[row] = {}
             for col = 1, newWidth do
                 if row <= oldH and col <= oldW and oldData[row] then
                     layer.data[row][col] = oldData[row][col] or 0
+                    if oldRotation and oldRotation[row] then
+                        layer.rotationData[row][col] = oldRotation[row][col]
+                    end
                 else
                     layer.data[row][col] = 0
                 end
@@ -477,6 +535,42 @@ end
 ---@param col number
 function TilemapData.Erase(row, col)
     TilemapData.Paint(row, col, 0)
+end
+
+--- 设置活跃图层上指定格子的旋转角度
+---@param row number
+---@param col number
+---@param rotation number 0/90/180/270
+function TilemapData.SetRotation(row, col, rotation)
+    if row < 1 or row > TilemapData.gridHeight then return end
+    if col < 1 or col > TilemapData.gridWidth then return end
+    local layer = TilemapData.layers[TilemapData.activeLayerIndex]
+    if not layer then return end
+    if not layer.rotationData then
+        layer.rotationData = CreateEmptyRotationGrid(TilemapData.gridWidth, TilemapData.gridHeight)
+    end
+    if not layer.rotationData[row] then
+        layer.rotationData[row] = {}
+    end
+    if rotation == 0 then
+        layer.rotationData[row][col] = nil  -- 0 度不存储，节省空间
+    else
+        layer.rotationData[row][col] = rotation
+    end
+end
+
+--- 获取指定图层格子的旋转角度
+---@param layerIndex number
+---@param row number
+---@param col number
+---@return number 旋转角度（0/90/180/270）
+function TilemapData.GetRotation(layerIndex, row, col)
+    if row < 1 or row > TilemapData.gridHeight then return 0 end
+    if col < 1 or col > TilemapData.gridWidth then return 0 end
+    local layer = TilemapData.layers[layerIndex]
+    if not layer or not layer.rotationData then return 0 end
+    if not layer.rotationData[row] then return 0 end
+    return layer.rotationData[row][col] or 0
 end
 
 --- 获取指定图层格子值
@@ -526,10 +620,17 @@ function TilemapData.Serialize()
     -- 预制体注册表
     for id, info in pairs(TilemapData.prefabRegistry) do
         if id >= 1 then
-            data.prefabRegistry[tostring(id)] = {
+            local entry = {
                 name = info.name, tag = info.tag,
                 icon = info.icon, color = info.color,
             }
+            -- 保存自定义属性
+            if info.playerCount then entry.playerCount = info.playerCount end
+            if info.acceptCount then entry.acceptCount = info.acceptCount end
+            if info.image then entry.image = info.image end
+            if info.range then entry.range = info.range end
+            if info.speed then entry.speed = info.speed end
+            data.prefabRegistry[tostring(id)] = entry
         end
     end
 
@@ -542,12 +643,20 @@ function TilemapData.Serialize()
             zOrder = layer.zOrder,
             visible = layer.visible,
             cells = {},
+            rotations = {},  -- 稀疏旋转数据 { row, col, rotation }
         }
         for row = 1, TilemapData.gridHeight do
             for col = 1, TilemapData.gridWidth do
                 local v = layer.data[row][col]
                 if v ~= 0 then
                     table.insert(layerData.cells, { row, col, v })
+                end
+                -- 保存旋转数据
+                if layer.rotationData and layer.rotationData[row] then
+                    local rot = layer.rotationData[row][col]
+                    if rot and rot ~= 0 then
+                        table.insert(layerData.rotations, { row, col, rot })
+                    end
                 end
             end
         end
@@ -585,10 +694,17 @@ function TilemapData.Deserialize(data)
         for idStr, info in pairs(data.prefabRegistry) do
             local id = tonumber(idStr)
             if id then
-                TilemapData.prefabRegistry[id] = {
+                local entry = {
                     id = id, name = info.name, tag = info.tag,
                     icon = info.icon or "❓", color = info.color or { 180, 180, 180, 200 },
                 }
+                -- 恢复自定义属性
+                if info.playerCount then entry.playerCount = info.playerCount end
+                if info.acceptCount then entry.acceptCount = info.acceptCount end
+                if info.image then entry.image = info.image end
+                if info.range then entry.range = info.range end
+                if info.speed then entry.speed = info.speed end
+                TilemapData.prefabRegistry[id] = entry
                 if id >= TilemapData.nextPrefabId then
                     TilemapData.nextPrefabId = id + 1
                 end
@@ -601,12 +717,24 @@ function TilemapData.Deserialize(data)
         local maxUid = 0
         for _, layerData in ipairs(data.layers) do
             local grid = CreateEmptyGrid(TilemapData.gridWidth, TilemapData.gridHeight)
+            local rotGrid = CreateEmptyRotationGrid(TilemapData.gridWidth, TilemapData.gridHeight)
             if layerData.cells then
                 for _, entry in ipairs(layerData.cells) do
                     local row, col, v = entry[1], entry[2], entry[3]
                     if row >= 1 and row <= TilemapData.gridHeight
                         and col >= 1 and col <= TilemapData.gridWidth then
                         grid[row][col] = v
+                    end
+                end
+            end
+            -- 恢复旋转数据
+            if layerData.rotations then
+                for _, entry in ipairs(layerData.rotations) do
+                    local row, col, rot = entry[1], entry[2], entry[3]
+                    if row >= 1 and row <= TilemapData.gridHeight
+                        and col >= 1 and col <= TilemapData.gridWidth then
+                        if not rotGrid[row] then rotGrid[row] = {} end
+                        rotGrid[row][col] = rot
                     end
                 end
             end
@@ -617,6 +745,7 @@ function TilemapData.Deserialize(data)
                 zOrder = layerData.zOrder or 0,
                 visible = layerData.visible ~= false,
                 data = grid,
+                rotationData = rotGrid,
             })
             if (layerData.id or 0) > maxUid then
                 maxUid = layerData.id

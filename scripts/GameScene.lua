@@ -10,8 +10,21 @@ local CloneSystem = require("CloneSystem")
 local LevelData = require("LevelData")
 local SceneManager = require("SceneManager")
 local ParallaxBackground = require("ParallaxBackground")
+local BGM = require("BGM")
+local UIScenes = require("UIScenes")
 
 local GameScene = {}
+
+-- 木板按钮公共样式
+local WOODEN_BTN = {
+    image = "image/wooden_btn.png",
+    slice = {12, 10, 12, 10},        -- top, right, bottom, left (像素) - 透明背景版
+    fit = "sliced",
+    textColor = {55, 28, 5, 255},
+    fontWeight = "bold",
+    bgColor = {0, 0, 0, 0},          -- 按钮本身透明
+    shadow = {},                       -- 无阴影
+}
 
 -- 内部状态
 local scene_ = nil
@@ -26,7 +39,9 @@ local currentLevel_ = 1
 -- 关卡数据
 local platforms_ = {}
 local spikes_ = {}
-local goalArea_ = nil
+local goals_ = {}           -- 多终点数组 { x, y, width, height, acceptCount, node }
+local goalTarget_ = 0       -- 关卡目标（所有终点 acceptCount 之和）
+local goalArea_ = nil       -- 兼容旧单终点数据（LevelData 模块）
 local spawnPos_ = { x = 0, y = 0 }  -- 出生点坐标
 
 -- 瓦片纹理渲染数据（编辑器测试模式）
@@ -35,8 +50,10 @@ local tileImages_ = {}        -- 已加载的纹理缓存 { [imagePath] = nvgIma
 local hasTileTextures_ = false  -- 是否使用纹理渲染（编辑器模式）
 
 -- 地图尺寸（物理单位，用于自适应相机）
-local mapGridW_ = 0   -- 网格列数（如 16）
-local mapGridH_ = 0   -- 网格行数（如 9）
+local mapGridW_ = 0   -- 内容宽度
+local mapGridH_ = 0   -- 内容高度
+local contentMinY_ = 0  -- 内容底边 Y（用于相机垂直定位）
+local contentCenterX_ = 0  -- 内容水平中心
 
 -- 游戏状态
 local STATE_PLAYING = "playing"
@@ -48,9 +65,28 @@ local stateTimer_ = 0  -- 胜负后的延迟
 local pauseUI_ = nil   -- 暂停菜单 UI 根引用
 local hudUI_ = nil     -- 游戏 HUD（含暂停按钮）
 
+-- 金币系统
+local coins_ = {}           -- { x, y, node, collected, vfxTimer }[]
+local coinCount_ = 0        -- 当前关卡已收集金币数
+local totalCoins_ = 0       -- 总金币数（持久化）
+local COIN_CLOUD_KEY = "player_total_coins"
+
+-- 装饰预制体（纯视觉，无碰撞）
+local decorations_ = {}     -- { x, y, image }[]
+local decorImages_ = {}     -- 已加载纹理缓存 { [imagePath] = nvgImageHandle }
+
+-- 海鸥飞行敌人
+local seagulls_ = {}        -- { x, y, minX, maxX, speed, dir, node, body }[]
+
 -- 渲染缓存
 local screenW_ = 0
 local screenH_ = 0
+local renderFrameCount_ = 0  -- 渲染帧计数器（跳过首帧避免NanoVG图片未就绪）
+
+-- 教程弹窗
+local TUTORIAL_CLOUD_KEY = "tutorial_seen"
+local tutorialSeen_ = false  -- 是否已看过教程（从 clientCloud 加载）
+local tutorialUI_ = nil      -- 教程弹窗 UI 引用
 
 -- 调试模式
 local debugMode_ = false
@@ -59,6 +95,14 @@ local testMode_ = false
 -- 视差背景
 local parallaxBg_ = nil
 
+-- 音效系统
+local sfxNode_ = nil         -- 音效节点
+local sfxSource_ = nil       -- SoundSource 组件
+local sfxCoin_ = nil         -- Sound: 金币收集
+local sfxGoal_ = nil         -- Sound: 到达终点
+local sfxWin_ = nil          -- Sound: 通关
+local sfxDeath_ = nil        -- Sound: 失败/死亡
+
 -- ============================================================================
 -- 精灵帧动画系统
 -- ============================================================================
@@ -66,11 +110,24 @@ local spriteFrames_ = {
     idle = {},    -- nvgImage 句柄数组
     run = {},
     jump = {},
+    fall = {},        -- 下落帧动画（2帧）
+    hit = {},         -- 受击白闪（1帧）
+    death = {},       -- 死亡帧动画（4帧）
     showoff = {},
+    spike = {},       -- 尖刺帧动画（4帧）
+    coin = {},        -- 金币帧动画（4帧）
+    coin_vfx = {},    -- 金币收集VFX（4帧）
+    seagull = {},     -- 海鸥飞行帧动画（8帧）
+    portal = {},      -- 传送门旋转动画（8帧）
 }
 local spriteAnimTimer_ = 0      -- 全局动画计时器
 local SPRITE_FPS = 8            -- 动画帧率（帧/秒）
-local SPRITE_DRAW_SIZE = 48     -- 精灵绘制大小（像素）
+local SPRITE_DRAW_SIZE = 72     -- 精灵绘制大小（像素）
+local PROP_FPS = 6              -- 道具帧动画帧率
+local VFX_FPS = 12              -- VFX 帧率（快速播放）
+local VFX_DURATION = 4 / VFX_FPS  -- VFX 总时长（4帧）
+local DEATH_HIT_DURATION = 0.15  -- hit 白闪持续时间（秒）
+local DEATH_FPS = 8              -- 死亡帧动画帧率
 
 -- ============================================================================
 -- 工具函数
@@ -114,16 +171,72 @@ function GameScene.LoadSpriteFrames()
         local img = nvgCreateImage(nvg_, path, 0)
         table.insert(spriteFrames_.run, img)
     end
+    -- fall: 2帧
+    for i = 1, 2 do
+        local path = "image/character/fall/character_berie_fall_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.fall, img)
+    end
+    -- hit: 1帧（受击白闪）
+    do
+        local img = nvgCreateImage(nvg_, "image/character/death/character_berie_hit_1.png", 0)
+        table.insert(spriteFrames_.hit, img)
+    end
+    -- death: 4帧
+    for i = 1, 4 do
+        local path = "image/character/death/character_berie_death_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.death, img)
+    end
     -- showoff: 7帧
     for i = 1, 7 do
         local path = "image/character/showoff/berie_showoff_" .. i .. ".png"
         local img = nvgCreateImage(nvg_, path, 0)
         table.insert(spriteFrames_.showoff, img)
     end
+
+    -- 尖刺: 4帧
+    for i = 1, 4 do
+        local path = "image/Prop/trap_spike_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.spike, img)
+    end
+    -- 金币: 4帧
+    for i = 1, 4 do
+        local path = "image/Prop/collectibles_coin_gold_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.coin, img)
+    end
+    -- 金币VFX: 4帧
+    for i = 1, 4 do
+        local path = "image/Prop/vfx_effect_coin_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.coin_vfx, img)
+    end
+    -- 海鸥: 8帧
+    for i = 1, 8 do
+        local path = "image/enemy/seagull/seagull_fly_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.seagull, img)
+    end
+    -- 传送门: 6帧
+    for i = 1, 6 do
+        local path = "image/goal/portal/portal_" .. i .. ".png"
+        local img = nvgCreateImage(nvg_, path, 0)
+        table.insert(spriteFrames_.portal, img)
+    end
+
     print("[GameScene] Loaded sprite frames: idle=" .. #spriteFrames_.idle
         .. " jump=" .. #spriteFrames_.jump
+        .. " fall=" .. #spriteFrames_.fall
+        .. " hit=" .. #spriteFrames_.hit
+        .. " death=" .. #spriteFrames_.death
         .. " run=" .. #spriteFrames_.run
-        .. " showoff=" .. #spriteFrames_.showoff)
+        .. " showoff=" .. #spriteFrames_.showoff
+        .. " spike=" .. #spriteFrames_.spike
+        .. " coin=" .. #spriteFrames_.coin
+        .. " coin_vfx=" .. #spriteFrames_.coin_vfx
+        .. " seagull=" .. #spriteFrames_.seagull)
 end
 
 --- 根据角色物理状态获取当前动画名和帧索引
@@ -132,6 +245,21 @@ end
 function GameScene.GetAnimFrame(player)
     local vel = player.body and player.body.linearVelocity or Vector2(0, 0)
 
+    -- 死亡动画（hit白闪 → death帧序列）
+    if not player.isAlive and player.deathTime then
+        if player.deathTime < DEATH_HIT_DURATION then
+            -- hit 白闪阶段
+            return "hit", 1
+        else
+            -- death 帧序列（非循环，停在最后一帧）
+            local deathElapsed = player.deathTime - DEATH_HIT_DURATION
+            local frameIdx = math.floor(deathElapsed * DEATH_FPS) + 1
+            local totalFrames = #spriteFrames_.death
+            if frameIdx > totalFrames then frameIdx = totalFrames end
+            return "death", frameIdx
+        end
+    end
+
     -- 到达终点 → showoff
     if player.reachedGoal then
         local totalFrames = #spriteFrames_.showoff
@@ -139,21 +267,22 @@ function GameScene.GetAnimFrame(player)
         return "showoff", idx
     end
 
-    -- 空中（不在地面）→ jump
+    -- 空中（不在地面）
     if not player.onGround then
-        -- 上升用前两帧，下降用后两帧
-        local jumpFrames = #spriteFrames_.jump
-        if jumpFrames > 0 then
-            local idx
-            if vel.y > 0.5 then
-                -- 上升
-                idx = math.floor(spriteAnimTimer_ * SPRITE_FPS) % 2 + 1
-            else
-                -- 下降
-                idx = math.floor(spriteAnimTimer_ * SPRITE_FPS) % 2 + 3
-                if idx > jumpFrames then idx = jumpFrames end
+        if vel.y > 0.5 then
+            -- 上升 → jump（前两帧循环）
+            local jumpFrames = #spriteFrames_.jump
+            if jumpFrames > 0 then
+                local idx = math.floor(spriteAnimTimer_ * SPRITE_FPS) % 2 + 1
+                return "jump", idx
             end
-            return "jump", idx
+        else
+            -- 下落 → fall（2帧循环）
+            local fallFrames = #spriteFrames_.fall
+            if fallFrames > 0 then
+                local idx = math.floor(spriteAnimTimer_ * SPRITE_FPS) % fallFrames + 1
+                return "fall", idx
+            end
         end
     end
 
@@ -187,6 +316,7 @@ function GameScene.Enter(params)
     directLevelData_ = (params and params.levelData) or nil
     gameState_ = STATE_PLAYING
     stateTimer_ = 0
+    renderFrameCount_ = 0  -- 重置帧计数器
 
     -- 清除 UI（游戏场景使用独立 NanoVG 渲染）
     UI.SetRoot(nil)
@@ -220,6 +350,16 @@ function GameScene.Enter(params)
     SubscribeToEvent("PhysicsBeginContact2D", "GameScene_HandleContactBegin")
     SubscribeToEvent("PhysicsEndContact2D", "GameScene_HandleContactEnd")
 
+    -- 从 clientCloud 加载总金币数
+    clientCloud:Get(COIN_CLOUD_KEY, {
+        onComplete = function(success, key, value)
+            if success and value then
+                totalCoins_ = tonumber(value) or 0
+                print("[GameScene] Loaded total coins: " .. totalCoins_)
+            end
+        end,
+    })
+
     -- 创建 HUD（暂停按钮）
     hudUI_ = UI.Panel {
         width = "100%", height = "100%",
@@ -234,6 +374,7 @@ function GameScene.Enter(params)
                         fontSize = 18,
                         borderRadius = 20,
                         onClick = function(self)
+                            UIScenes.PlayUIClick()
                             if gameState_ == STATE_PLAYING then
                                 GameScene.Pause()
                             end
@@ -244,6 +385,23 @@ function GameScene.Enter(params)
         },
     }
     UI.SetRoot(hudUI_)
+
+    -- 第一次进入第1关时检查是否需要显示教程
+    if currentLevel_ == 1 and not fromEditor_ then
+        clientCloud:Get(TUTORIAL_CLOUD_KEY, {
+            onComplete = function(success, key, value)
+                if success and value == "1" then
+                    tutorialSeen_ = true
+                    print("[GameScene] Tutorial already seen")
+                else
+                    tutorialSeen_ = false
+                    -- 首次进入，显示教程弹窗并暂停
+                    GameScene.ShowTutorial()
+                    print("[GameScene] Showing tutorial for first time")
+                end
+            end,
+        })
+    end
 
     if fromEditor_ then
         print("[GameScene] Entered EDITOR TEST mode")
@@ -285,7 +443,7 @@ function GameScene.Exit()
                 end
             end
         end
-        spriteFrames_ = { idle = {}, run = {}, jump = {}, showoff = {} }
+        spriteFrames_ = { idle = {}, run = {}, jump = {}, fall = {}, hit = {}, death = {}, showoff = {}, spike = {}, coin = {}, coin_vfx = {}, seagull = {}, portal = {} }
         spriteAnimTimer_ = 0
 
         UnsubscribeFromEvent(nvg_, "NanoVGRender")
@@ -300,12 +458,29 @@ function GameScene.Exit()
 
     platforms_ = {}
     spikes_ = {}
+    seagulls_ = {}
+    goals_ = {}
+    goalTarget_ = 0
+    coins_ = {}
+    coinCount_ = 0
+    decorations_ = {}
+    decorImages_ = {}
     goalArea_ = nil
     mapGridW_ = 0
     mapGridH_ = 0
+    contentMinY_ = 0
+    contentCenterX_ = 0
     tileCells_ = {}
     tileImages_ = {}
     hasTileTextures_ = false
+
+    -- 清理音效
+    sfxNode_ = nil
+    sfxSource_ = nil
+    sfxCoin_ = nil
+    sfxGoal_ = nil
+    sfxWin_ = nil
+    sfxDeath_ = nil
 end
 
 -- ============================================================================
@@ -329,6 +504,26 @@ function GameScene.CreatePhysicsScene()
     cameraNode_.position = Vector3(0, 3, -10)
 
     renderer:SetViewport(0, Viewport:new(scene_, camera))
+
+    -- 初始化音效系统
+    sfxNode_ = scene_:CreateChild("SFX")
+    sfxSource_ = sfxNode_:CreateComponent("SoundSource")
+    sfxSource_:SetSoundType("Effect")
+
+    sfxCoin_ = cache:GetResource("Sound", "audio/sfx/coin_collect.ogg")
+    sfxGoal_ = cache:GetResource("Sound", "audio/sfx/reach_endpoint.ogg")
+    sfxWin_ = cache:GetResource("Sound", "audio/sfx/level_complete.ogg")
+    sfxDeath_ = cache:GetResource("Sound", "audio/sfx/player_death.ogg")
+end
+
+--- 播放音效（最终音量 = 个体系数 × 全局音效音量）
+---@param sound userdata Sound 资源
+---@param gain number|nil 个体音量系数（默认0.35）
+local function PlaySFX(sound, gain)
+    if not sound or not sfxSource_ then return end
+    local individualGain = gain or 0.35
+    local masterSfx = Config.Settings.SFXVolume or 0.4
+    sfxSource_:Play(sound, sound.frequency, individualGain * masterSfx)
 end
 
 -- ============================================================================
@@ -359,6 +554,7 @@ end
 function GameScene.ApplyLevelData(levelData)
     platforms_ = {}
     spikes_ = {}
+    seagulls_ = {}
     tileCells_ = {}
     tileImages_ = {}
     hasTileTextures_ = false
@@ -379,13 +575,10 @@ function GameScene.ApplyLevelData(levelData)
         print("[GameScene] Loaded tile textures: " .. #tileCells_ .. " cells")
     end
 
-    -- 保存地图尺寸并动态调整相机（Cover 策略：地图完全覆盖屏幕）
+    -- 保存地图网格尺寸（用于渲染参考）
     if levelData.gridHeight and levelData.gridWidth then
         mapGridW_ = levelData.gridWidth
         mapGridH_ = levelData.gridHeight
-        -- 初始设置（后续每帧在 Render 中根据实际屏幕比例动态调整）
-        local camera = cameraNode_:GetComponent("Camera")
-        camera.orthoSize = mapGridH_
     end
 
     -- 创建平台
@@ -417,8 +610,14 @@ function GameScene.ApplyLevelData(levelData)
         local body = node:CreateComponent("RigidBody2D")
         body.bodyType = BT_STATIC
 
+        local rot = sData.rotation or 0
         local shape = node:CreateComponent("CollisionBox2D")
-        shape:SetSize(sData.width, 0.4)
+        -- 90°/270° 时尖刺变为竖向，交换碰撞盒宽高
+        if rot == 90 or rot == 270 then
+            shape:SetSize(0.4, sData.width)
+        else
+            shape:SetSize(sData.width, 0.4)
+        end
         shape.trigger = true
         shape.categoryBits = 8
         shape.maskBits = 2  -- 只与玩家碰撞
@@ -426,25 +625,207 @@ function GameScene.ApplyLevelData(levelData)
         table.insert(spikes_, {
             x = sData.x, y = sData.y,
             width = sData.width,
+            rotation = rot,
             node = node,
         })
     end
 
-    -- 终点区域（传感器）
-    goalArea_ = levelData.goal
-    local goalNode = scene_:CreateChild("Goal")
-    goalNode:SetPosition2D(goalArea_.x, goalArea_.y)
+    -- 创建海鸥飞行敌人（水平巡逻）
+    if levelData.seagulls then
+        for i, gData in ipairs(levelData.seagulls) do
+            local node = scene_:CreateChild("Seagull")
+            node:SetPosition2D(gData.x, gData.y)
 
-    local goalBody = goalNode:CreateComponent("RigidBody2D")
-    goalBody.bodyType = BT_STATIC
+            local body = node:CreateComponent("RigidBody2D")
+            body.bodyType = BT_KINEMATIC
+            body.gravityScale = 0
 
-    local goalShape = goalNode:CreateComponent("CollisionBox2D")
-    goalShape:SetSize(goalArea_.width, goalArea_.height)
-    goalShape.trigger = true
-    goalShape.categoryBits = 16
-    goalShape.maskBits = 2
+            local shape = node:CreateComponent("CollisionBox2D")
+            shape:SetSize(0.45, 0.3)
+            shape.trigger = true
+            shape.categoryBits = 64
+            shape.maskBits = 2  -- 只与玩家碰撞
 
-    -- 设置相机位置到关卡中心
+            local speed = (gData.speed or 2.0) * 0.6
+            local range = gData.range or 3.0
+            table.insert(seagulls_, {
+                x = gData.x, y = gData.y,
+                minX = gData.x - range,
+                maxX = gData.x + range,
+                speed = speed,
+                dir = 1,  -- 1=右, -1=左
+                node = node,
+                body = body,
+            })
+        end
+    end
+
+    -- 创建金币（用传感器检测）
+    coins_ = {}
+    coinCount_ = 0
+    if levelData.coins then
+        for i, cData in ipairs(levelData.coins) do
+            local node = scene_:CreateChild("Coin")
+            node:SetPosition2D(cData.x, cData.y)
+
+            local body = node:CreateComponent("RigidBody2D")
+            body.bodyType = BT_STATIC
+
+            local shape = node:CreateComponent("CollisionCircle2D")
+            shape.radius = 0.35
+            shape.trigger = true
+            shape.categoryBits = 32
+            shape.maskBits = 2  -- 只与玩家碰撞
+
+            table.insert(coins_, {
+                x = cData.x, y = cData.y,
+                node = node,
+                collected = false,
+                vfxTimer = -1,  -- -1 = 未触发VFX
+            })
+        end
+    end
+
+    -- 加载装饰预制体（纯视觉，不创建物理体）
+    decorations_ = {}
+    decorImages_ = {}
+    if levelData.decorations then
+        for _, dData in ipairs(levelData.decorations) do
+            table.insert(decorations_, { x = dData.x, y = dData.y, image = dData.image })
+            -- 预加载纹理
+            if dData.image and not decorImages_[dData.image] then
+                local img = nvgCreateImage(nvg_, dData.image, 0)
+                if img and img > 0 then
+                    decorImages_[dData.image] = img
+                end
+            end
+        end
+        if #decorations_ > 0 then
+            print("[GameScene] Loaded decorations: " .. #decorations_)
+        end
+    end
+
+    -- 终点区域（传感器）— 支持多终点
+    goals_ = {}
+    goalTarget_ = 0
+
+    if levelData.goals and #levelData.goals > 0 then
+        -- 新格式：多终点数组（硬编码3只小猪通关）
+        goalTarget_ = 3
+        for i, gData in ipairs(levelData.goals) do
+            local goalNode = scene_:CreateChild("Goal")
+            goalNode:SetPosition2D(gData.x, gData.y)
+
+            local goalBody = goalNode:CreateComponent("RigidBody2D")
+            goalBody.bodyType = BT_STATIC
+
+            local goalShape = goalNode:CreateComponent("CollisionBox2D")
+            goalShape:SetSize(gData.width, gData.height)
+            goalShape.trigger = true
+            goalShape.categoryBits = 16
+            goalShape.maskBits = 2
+
+            table.insert(goals_, {
+                x = gData.x, y = gData.y,
+                width = gData.width, height = gData.height,
+                acceptCount = gData.acceptCount or 1,
+                node = goalNode,
+            })
+        end
+        -- 兼容旧渲染：goalArea_ 指向第一个终点
+        goalArea_ = goals_[1]
+    elseif levelData.goal then
+        -- 旧格式：单终点（硬编码3只小猪通关）
+        goalArea_ = levelData.goal
+        goalTarget_ = 3
+
+        local goalNode = scene_:CreateChild("Goal")
+        goalNode:SetPosition2D(goalArea_.x, goalArea_.y)
+
+        local goalBody = goalNode:CreateComponent("RigidBody2D")
+        goalBody.bodyType = BT_STATIC
+
+        local goalShape = goalNode:CreateComponent("CollisionBox2D")
+        goalShape:SetSize(goalArea_.width, goalArea_.height)
+        goalShape.trigger = true
+        goalShape.categoryBits = 16
+        goalShape.maskBits = 2
+
+        table.insert(goals_, {
+            x = goalArea_.x, y = goalArea_.y,
+            width = goalArea_.width, height = goalArea_.height,
+            acceptCount = goalTarget_,
+            node = goalNode,
+        })
+    end
+
+    -- 计算实际内容包围盒（基于所有游戏元素的位置）
+    local minX, maxX = math.huge, -math.huge
+    local minY, maxY = math.huge, -math.huge
+
+    local function expandBounds(x, y, hw, hh)
+        hw = hw or 0
+        hh = hh or 0
+        if x - hw < minX then minX = x - hw end
+        if x + hw > maxX then maxX = x + hw end
+        if y - hh < minY then minY = y - hh end
+        if y + hh > maxY then maxY = y + hh end
+    end
+
+    -- 出生点
+    expandBounds(levelData.spawn.x, levelData.spawn.y, 0.5, 0.5)
+
+    -- 平台
+    for _, p in ipairs(platforms_) do
+        expandBounds(p.x, p.y, p.width / 2, p.height / 2)
+    end
+
+    -- 终点
+    for _, g in ipairs(goals_) do
+        expandBounds(g.x, g.y, g.width / 2, g.height / 2)
+    end
+
+    -- 金币
+    for _, c in ipairs(coins_) do
+        expandBounds(c.x, c.y, 0.3, 0.3)
+    end
+
+    -- 刺
+    for _, s in ipairs(spikes_) do
+        expandBounds(s.x, s.y, s.width / 2, 0.3)
+    end
+    -- 海鸥巡逻范围
+    for _, sg in ipairs(seagulls_) do
+        expandBounds(sg.x, sg.y, (sg.maxX - sg.minX) / 2, 0.5)
+    end
+
+    -- 计算内容尺寸（负边距让边缘被裁掉，不露馅）
+    local padding = -4.0
+    local contentW = (maxX - minX) + padding * 2
+    local contentH = (maxY - minY) + padding * 2
+    local contentCX = (minX + maxX) / 2
+
+    -- 保存用于动态适配
+    mapGridW_ = contentW
+    mapGridH_ = contentH
+    contentMinY_ = minY - padding
+    contentCenterX_ = contentCX
+
+    -- Fit All：根据屏幕宽高比决定 orthoSize
+    local dpr = graphics:GetDPR()
+    local sw = graphics:GetWidth() / dpr
+    local sh = graphics:GetHeight() / dpr
+    local aspect = sw / sh
+    local neededH = contentH
+    local neededW = contentW / aspect
+    local camera = cameraNode_:GetComponent("Camera")
+    camera.orthoSize = math.max(neededH, neededW)
+
+    -- 设置相机位置：水平居中于内容，垂直让内容底边对齐视野底边
+    local camY = minY - padding + camera.orthoSize / 2
+    cameraNode_:SetPosition(Vector3(contentCX, camY, -10))
+
+    -- 如果关卡数据有显式相机位置，使用它覆盖
     if levelData.camera then
         cameraNode_:SetPosition(Vector3(levelData.camera.x, levelData.camera.y, -10))
     end
@@ -466,6 +847,9 @@ end
 
 function GameScene_HandleUpdate(eventType, eventData)
     local dt = eventData["TimeStep"]:GetFloat()
+
+    -- BGM 监控（不受暂停影响，始终保持音乐循环）
+    BGM.Tick()
 
     -- L 切换调试模式
     if input:GetKeyPress(KEY_L) then
@@ -544,6 +928,40 @@ function GameScene.UpdatePlaying(dt)
     -- 更新精灵动画计时器
     spriteAnimTimer_ = spriteAnimTimer_ + dt
 
+    -- 更新金币 VFX 计时器
+    for _, coin in ipairs(coins_) do
+        if coin.collected and coin.vfxTimer >= 0 then
+            coin.vfxTimer = coin.vfxTimer + dt
+        end
+    end
+
+    -- 更新海鸥巡逻
+    for _, sg in ipairs(seagulls_) do
+        local pos = sg.node:GetPosition2D()
+        local newX = pos.x + sg.speed * sg.dir * dt
+        -- 到达边界反转方向
+        if newX >= sg.maxX then
+            newX = sg.maxX
+            sg.dir = -1
+        elseif newX <= sg.minX then
+            newX = sg.minX
+            sg.dir = 1
+        end
+        sg.body.linearVelocity = Vector2(sg.speed * sg.dir, 0)
+    end
+
+    -- 更新死亡动画计时器（所有角色）
+    if mainPlayer_ and not mainPlayer_.isAlive and mainPlayer_.deathTime then
+        mainPlayer_.deathTime = mainPlayer_.deathTime + dt
+    end
+    if cloneSystem_ then
+        for _, clone in ipairs(cloneSystem_:GetClones()) do
+            if not clone.isAlive and clone.deathTime then
+                clone.deathTime = clone.deathTime + dt
+            end
+        end
+    end
+
     -- 更新克隆系统（计时器 + 角色生成）
     if cloneSystem_ then
         cloneSystem_:Update(dt)
@@ -568,14 +986,20 @@ function GameScene.UpdatePlaying(dt)
     GameScene.CheckFallDeath()
 
     -- 检测胜负（玩家还没生成时不检测）
-    if mainPlayer_ and cloneSystem_:AnyDead() then
+    -- 失败条件：剩余可能到达终点的小猪数 < 目标数
+    if mainPlayer_ and cloneSystem_:CountPotentialSuccess() < goalTarget_ then
         gameState_ = STATE_LOSE
         stateTimer_ = 0
-        print("[GameScene] GAME OVER - A character died!")
-    elseif mainPlayer_ and cloneSystem_:AllReachedGoal() then
+        PlaySFX(sfxDeath_, 0.35)
+        print("[GameScene] GAME OVER - Not enough pigs to reach goal!")
+    elseif mainPlayer_ and cloneSystem_:CountReachedGoal() >= goalTarget_ and not cloneSystem_:IsActive() then
         gameState_ = STATE_WIN
         stateTimer_ = 0
-        print("[GameScene] LEVEL CLEAR!")
+        PlaySFX(sfxWin_, 0.4)
+        -- 保存关卡进度，解锁下一关
+        local Progress = require("Progress")
+        Progress.CompleteLevel(currentLevel_)
+        print("[GameScene] LEVEL CLEAR! (" .. cloneSystem_:CountReachedGoal() .. "/" .. goalTarget_ .. ")")
     end
 end
 
@@ -590,6 +1014,7 @@ function GameScene.CheckFallDeath()
         local pos = mainPlayer_:GetPosition()
         if pos.y < fallDeathY then
             mainPlayer_:Kill()
+            PlaySFX(sfxDeath_, 0.3)
         end
     end
     -- 检查克隆体
@@ -599,6 +1024,7 @@ function GameScene.CheckFallDeath()
                 local pos = clone:GetPosition()
                 if pos.y < fallDeathY then
                     clone:Kill()
+                    PlaySFX(sfxDeath_, 0.3)
                 end
             end
         end
@@ -617,6 +1043,21 @@ function GameScene_HandleContactBegin(eventType, eventData)
     if nodeA.name == "Spike" or nodeB.name == "Spike" then
         local charNode = (nodeA.name == "Spike") and nodeB or nodeA
         GameScene.HandleSpikeHit(charNode)
+        return
+    end
+
+    -- 检测海鸥碰撞
+    if nodeA.name == "Seagull" or nodeB.name == "Seagull" then
+        local charNode = (nodeA.name == "Seagull") and nodeB or nodeA
+        GameScene.HandleSpikeHit(charNode)  -- 复用尖刺击杀逻辑
+        return
+    end
+
+    -- 检测金币碰撞
+    if nodeA.name == "Coin" or nodeB.name == "Coin" then
+        local coinNode = (nodeA.name == "Coin") and nodeA or nodeB
+        local charNode = (nodeA.name == "Coin") and nodeB or nodeA
+        GameScene.HandleCoinCollect(charNode, coinNode)
         return
     end
 
@@ -652,7 +1093,12 @@ function GameScene.HandleGroundContact(nodeA, nodeB, isBegin)
     end
 
     if not charNode then return end
-    if otherNode.name ~= "Platform" and otherNode.name ~= "Ground" then return end
+
+    -- 允许平台、地面、以及其他角色（猪踩猪）作为有效地面
+    local otherName = otherNode.name
+    local isValidGround = (otherName == "Platform" or otherName == "Ground"
+        or otherName == "Player" or string.find(otherName, "Clone_", 1, true) ~= nil)
+    if not isValidGround then return end
 
     -- 找到对应的 Player 实例（玩家或克隆体）
     local player = GameScene.FindPlayerByNode(charNode)
@@ -669,6 +1115,7 @@ function GameScene.HandleSpikeHit(charNode)
     local player = GameScene.FindPlayerByNode(charNode)
     if player and player.isAlive then
         player:Kill()
+        PlaySFX(sfxDeath_, 0.3)
         print("[GameScene] Character hit spike: " .. charNode.name)
     end
 end
@@ -677,7 +1124,37 @@ function GameScene.HandleGoalReach(charNode)
     local player = GameScene.FindPlayerByNode(charNode)
     if player and player.isAlive and not player.reachedGoal then
         player:SetReachedGoal()
+        PlaySFX(sfxGoal_, 0.15)
         print("[GameScene] Character reached goal: " .. charNode.name)
+    end
+end
+
+function GameScene.HandleCoinCollect(charNode, coinNode)
+    local player = GameScene.FindPlayerByNode(charNode)
+    if not player or not player.isAlive then return end
+
+    -- 找到对应的 coin 数据
+    for _, coin in ipairs(coins_) do
+        if coin.node == coinNode and not coin.collected then
+            coin.collected = true
+            coin.vfxTimer = 0  -- 开始播放 VFX
+            coinCount_ = coinCount_ + 1
+            totalCoins_ = totalCoins_ + 1
+            PlaySFX(sfxCoin_, 0.8)
+            -- 持久化总金币数到云端
+            clientCloud:Set(COIN_CLOUD_KEY, tostring(totalCoins_), {
+                onComplete = function(success)
+                    if not success then
+                        print("[GameScene] Warning: failed to save coin count")
+                    end
+                end,
+            })
+            -- 禁用碰撞（不再触发）
+            local body = coinNode:GetComponent("RigidBody2D")
+            if body then body.enabled = false end
+            print("[GameScene] Coin collected! Level: " .. coinCount_ .. " Total: " .. totalCoins_)
+            break
+        end
     end
 end
 
@@ -715,28 +1192,39 @@ function GameScene_HandleRender(eventType, eventData)
     screenW_ = graphics:GetWidth() / dpr
     screenH_ = graphics:GetHeight() / dpr
 
-    -- 动态调整相机 orthoSize（Cover 策略：地图完全覆盖屏幕，不露出地图外部）
-    if mapGridW_ > 0 and mapGridH_ > 0 then
-        local screenAspect = screenW_ / screenH_
-        local mapAspect = mapGridW_ / mapGridH_
+    -- 首帧执行空渲染帧：NanoVG 图片(nvgCreateImage)需要至少一次 beginFrame/endFrame
+    -- 周期来完成纹理上传到 GPU，否则 imagePattern 绘制异常
+    renderFrameCount_ = renderFrameCount_ + 1
+    if renderFrameCount_ <= 1 then
+        nvgBeginFrame(nvg_, screenW_, screenH_, dpr)
+        nvgEndFrame(nvg_)
+        return
+    end
+
+    -- 动态调整相机 orthoSize（Fit All 策略：确保内容在任何宽高比下都完全可见）
+    if mapGridH_ > 0 and mapGridW_ > 0 then
         local camera = cameraNode_:GetComponent("Camera")
-        if screenAspect > mapAspect then
-            -- 屏幕比地图更宽 → 用宽度适配（减小 orthoSize 以放大）
-            camera.orthoSize = mapGridW_ / screenAspect
-        else
-            -- 屏幕比地图更高或相等 → 用高度适配
-            camera.orthoSize = mapGridH_
-        end
+        local aspect = screenW_ / screenH_
+        local neededH = mapGridH_
+        local neededW = mapGridW_ / aspect
+        camera.orthoSize = math.max(neededH, neededW)
+        -- 相机居中于内容，底边对齐内容底边，向上偏移
+        local camY = contentMinY_ + camera.orthoSize / 2 - 3.0
+        cameraNode_:SetPosition(Vector3(contentCenterX_, camY, -10))
     end
 
     nvgBeginFrame(nvg_, screenW_, screenH_, dpr)
 
     GameScene.DrawBackground()
+    GameScene.DrawDecorations()
     GameScene.DrawPlatforms()
     GameScene.DrawSpikes()
+    GameScene.DrawCoins()
+    GameScene.DrawSeagulls()
     GameScene.DrawGoal()
+    GameScene.DrawTimerUI()       -- tilemap后、角色前
     GameScene.DrawCharacters()
-    GameScene.DrawTimerUI()
+    GameScene.DrawHUD()           -- 左上角 HUD（金币+小猪+计时）
     GameScene.DrawGameState()
     if debugMode_ then
         GameScene.DrawDebugOverlay()
@@ -748,7 +1236,20 @@ end
 function GameScene.DrawBackground()
     -- 使用视差背景系统
     if parallaxBg_ then
-        parallaxBg_:Draw(screenW_, screenH_)
+        -- 计算地面在屏幕中的垂直比例（地面Y=内容底边对齐视野底边时约在底部）
+        local groundRatio = nil
+        if mapGridH_ > 0 and cameraNode_ then
+            local camera = cameraNode_:GetComponent("Camera")
+            local camY = cameraNode_.position.y
+            local orthoH = camera.orthoSize
+            local viewBottom = camY - orthoH / 2
+            -- 地面 Y 大约在 contentMinY_ + 几个单位处（取内容底部偏上一点作为海岸线位置）
+            local groundY = contentMinY_ + 2.0  -- 地面 Y（平台底部区域）
+            -- 转为屏幕比例：0=顶部, 1=底部
+            groundRatio = 1.0 - (groundY - viewBottom) / orthoH
+            groundRatio = math.max(0.5, math.min(1.0, groundRatio))
+        end
+        parallaxBg_:Draw(screenW_, screenH_, groundRatio)
     else
         -- 回退到纯色渐变
         local c1 = Config.Colors.Background1
@@ -821,74 +1322,287 @@ function GameScene.DrawPlatforms()
 end
 
 function GameScene.DrawSpikes()
-    local c = Config.Colors.Spike
     local ppu = GetPixelsPerUnit()
+    local frames = spriteFrames_.spike
+    if #frames == 0 then return end
+
+    -- 计算当前帧
+    local frameIdx = math.floor(spriteAnimTimer_ * PROP_FPS) % #frames + 1
+    local imgHandle = frames[frameIdx]
+    if not imgHandle or imgHandle == 0 then return end
+
     for _, s in ipairs(spikes_) do
         local sx, sy = PhysicsToScreen(s.x, s.y)
-        local sw = s.width * ppu
-        local spikeH = 0.4 * ppu
+        -- 尖刺绘制尺寸：1格
+        local drawSize = 1.0 * ppu
+        local rot = s.rotation or 0
 
-        -- 画三角形尖刺
-        local numSpikes = math.floor(sw / 12)
-        if numSpikes < 1 then numSpikes = 1 end
-        local spikeWidth = sw / numSpikes
-
-        for i = 0, numSpikes - 1 do
-            local bx = sx - sw/2 + i * spikeWidth
+        if rot ~= 0 then
+            -- 带旋转的尖刺：先平移到中心，再旋转绘制
+            nvgSave(nvg_)
+            nvgTranslate(nvg_, sx, sy)
+            nvgRotate(nvg_, math.rad(rot))
+            local imgPat = nvgImagePattern(nvg_, -drawSize/2, -drawSize/2, drawSize, drawSize, 0, imgHandle, 1.0)
             nvgBeginPath(nvg_)
-            nvgMoveTo(nvg_, bx, sy + spikeH/2)
-            nvgLineTo(nvg_, bx + spikeWidth/2, sy - spikeH/2)
-            nvgLineTo(nvg_, bx + spikeWidth, sy + spikeH/2)
-            nvgClosePath(nvg_)
-            nvgFillColor(nvg_, nvgRGBA(c[1], c[2], c[3], c[4]))
+            nvgRect(nvg_, -drawSize/2, -drawSize/2, drawSize, drawSize)
+            nvgFillPaint(nvg_, imgPat)
+            nvgFill(nvg_)
+            nvgRestore(nvg_)
+        else
+            local imgPat = nvgImagePattern(nvg_, sx - drawSize/2, sy - drawSize/2, drawSize, drawSize, 0, imgHandle, 1.0)
+            nvgBeginPath(nvg_)
+            nvgRect(nvg_, sx - drawSize/2, sy - drawSize/2, drawSize, drawSize)
+            nvgFillPaint(nvg_, imgPat)
             nvgFill(nvg_)
         end
     end
 end
 
-function GameScene.DrawGoal()
-    if not goalArea_ then return end
-    local c = Config.Colors.Goal
+function GameScene.DrawSeagulls()
     local ppu = GetPixelsPerUnit()
-    local sx, sy = PhysicsToScreen(goalArea_.x, goalArea_.y)
-    local sw = goalArea_.width * ppu
-    local sh = goalArea_.height * ppu
+    local frames = spriteFrames_.seagull
+    if #frames == 0 then return end
 
-    -- 闪烁效果
-    local pulse = math.sin(os.clock() * 3) * 0.3 + 0.7
-    local alpha = math.floor(pulse * 180)
+    local frameIdx = math.floor(spriteAnimTimer_ * PROP_FPS) % #frames + 1
+    local imgHandle = frames[frameIdx]
+    if not imgHandle or imgHandle == 0 then return end
 
+    for _, sg in ipairs(seagulls_) do
+        local pos = sg.node:GetPosition2D()
+        local sx, sy = PhysicsToScreen(pos.x, pos.y)
+        local drawSize = 1.0 * ppu  -- 1格大小
+
+        -- 根据方向翻转
+        nvgSave(nvg_)
+        nvgTranslate(nvg_, sx, sy)
+        if sg.dir < 0 then
+            nvgScale(nvg_, -1, 1)
+        end
+        local imgPat = nvgImagePattern(nvg_, -drawSize/2, -drawSize/2, drawSize, drawSize, 0, imgHandle, 1.0)
+        nvgBeginPath(nvg_)
+        nvgRect(nvg_, -drawSize/2, -drawSize/2, drawSize, drawSize)
+        nvgFillPaint(nvg_, imgPat)
+        nvgFill(nvg_)
+        nvgRestore(nvg_)
+    end
+end
+
+function GameScene.DrawCoins()
+    local ppu = GetPixelsPerUnit()
+    local coinFrames = spriteFrames_.coin
+    local vfxFrames = spriteFrames_.coin_vfx
+
+    -- 金币帧动画（循环）
+    local coinFrameIdx = 1
+    if #coinFrames > 0 then
+        coinFrameIdx = math.floor(spriteAnimTimer_ * PROP_FPS) % #coinFrames + 1
+    end
+
+    for _, coin in ipairs(coins_) do
+        local sx, sy = PhysicsToScreen(coin.x, coin.y)
+        local drawSize = 0.8 * ppu  -- 金币略小于1格
+
+        if not coin.collected then
+            -- 未收集：渲染金币帧动画
+            if #coinFrames > 0 then
+                local imgHandle = coinFrames[coinFrameIdx]
+                if imgHandle and imgHandle ~= 0 then
+                    local imgPat = nvgImagePattern(nvg_, sx - drawSize/2, sy - drawSize/2, drawSize, drawSize, 0, imgHandle, 1.0)
+                    nvgBeginPath(nvg_)
+                    nvgRect(nvg_, sx - drawSize/2, sy - drawSize/2, drawSize, drawSize)
+                    nvgFillPaint(nvg_, imgPat)
+                    nvgFill(nvg_)
+                end
+            end
+        else
+            -- 已收集：播放 VFX 动画
+            if coin.vfxTimer >= 0 and coin.vfxTimer < VFX_DURATION and #vfxFrames > 0 then
+                local vfxIdx = math.floor(coin.vfxTimer * VFX_FPS) % #vfxFrames + 1
+                local imgHandle = vfxFrames[vfxIdx]
+                if imgHandle and imgHandle ~= 0 then
+                    -- VFX 稍大一些
+                    local vfxSize = 1.2 * ppu
+                    local imgPat = nvgImagePattern(nvg_, sx - vfxSize/2, sy - vfxSize/2, vfxSize, vfxSize, 0, imgHandle, 1.0)
+                    nvgBeginPath(nvg_)
+                    nvgRect(nvg_, sx - vfxSize/2, sy - vfxSize/2, vfxSize, vfxSize)
+                    nvgFillPaint(nvg_, imgPat)
+                    nvgFill(nvg_)
+                end
+            end
+        end
+    end
+end
+
+function GameScene.DrawDecorations()
+    if #decorations_ == 0 then return end
+    local ppu = GetPixelsPerUnit()
+    local TREE_HEIGHT_UNITS = 3.0  -- 树高度（物理单位），约为玩家的 2.5~3 倍
+
+    for _, d in ipairs(decorations_) do
+        local imgHandle = decorImages_[d.image]
+        if imgHandle and imgHandle > 0 then
+            local sx, sy = PhysicsToScreen(d.x, d.y)
+
+            -- 获取图片原始尺寸，按高度缩放保持宽高比
+            local imgW, imgH = nvgImageSize(nvg_, imgHandle)
+            local drawH = TREE_HEIGHT_UNITS * ppu
+            local drawW = drawH * (imgW / imgH)
+
+            -- 底部对齐到格子底边（sy 是格子中心，往下半格即底边）
+            local bottomY = sy + 0.5 * ppu
+            local drawX = sx - drawW / 2
+            local drawY = bottomY - drawH
+
+            local imgPat = nvgImagePattern(nvg_, drawX, drawY, drawW, drawH, 0, imgHandle, 1.0)
+            nvgBeginPath(nvg_)
+            nvgRect(nvg_, drawX, drawY, drawW, drawH)
+            nvgFillPaint(nvg_, imgPat)
+            nvgFill(nvg_)
+        end
+    end
+end
+
+function GameScene.DrawHUD()
+    -- 左上角像素风 HUD 面板
+    local margin = 10
+    local px = margin
+    local py = margin
+    local rowH = 24       -- 每行高度
+    local iconSz = 20     -- 图标大小
+    local panelW = 140
+    local panelH = rowH * 3 + 12  -- 3行内容 + padding
+
+    -- 面板背景
     nvgBeginPath(nvg_)
-    nvgRoundedRect(nvg_, sx - sw/2, sy - sh/2, sw, sh, 6)
-    nvgFillColor(nvg_, nvgRGBA(c[1], c[2], c[3], alpha))
+    nvgRect(nvg_, px, py, panelW, panelH)
+    nvgFillColor(nvg_, nvgRGBA(15, 15, 35, 200))
     nvgFill(nvg_)
 
-    -- 旗帜标记
+    -- 2px 像素边框
     nvgBeginPath(nvg_)
-    nvgMoveTo(nvg_, sx, sy - sh/2 + 5)
-    nvgLineTo(nvg_, sx, sy + sh/2 - 5)
-    nvgStrokeWidth(nvg_, 3)
-    nvgStrokeColor(nvg_, nvgRGBA(c[1], c[2], c[3], 255))
+    nvgRect(nvg_, px, py, panelW, panelH)
+    nvgStrokeWidth(nvg_, 2)
+    nvgStrokeColor(nvg_, nvgRGBA(58, 58, 106, 255))
     nvgStroke(nvg_)
 
-    -- 星形标记
     nvgFontFace(nvg_, "sans")
-    nvgFontSize(nvg_, 24)
-    nvgTextAlign(nvg_, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
-    nvgFillColor(nvg_, nvgRGBA(c[1], c[2], c[3], 255))
-    nvgText(nvg_, sx, sy, "★")
+    nvgFontSize(nvg_, 14)
+    nvgTextAlign(nvg_, NVG_ALIGN_LEFT + NVG_ALIGN_MIDDLE)
+
+    local contentX = px + 8
+    local contentY = py + 6 + rowH / 2
+
+    -- 第1行：小猪数量（剩余/需要）
+    local reached = 0
+    local totalPigs = 0
+    if cloneSystem_ then
+        reached = cloneSystem_:CountReachedGoal()
+        -- 总小猪 = 已生成的（含已到终点和存活的）
+        totalPigs = cloneSystem_:GetCurrentNumber() -- 还没生的
+        if cloneSystem_:GetMainPlayer() then
+            totalPigs = totalPigs + 1 + #cloneSystem_:GetClones()
+        end
+    end
+    nvgFillColor(nvg_, nvgRGBA(255, 180, 200, 255))
+    nvgText(nvg_, contentX, contentY, "🐷")
+    nvgFillColor(nvg_, nvgRGBA(240, 240, 240, 255))
+    nvgText(nvg_, contentX + iconSz + 4, contentY, reached .. "/" .. goalTarget_ .. " 目标")
+
+    -- 第2行：计时器倒计时
+    contentY = contentY + rowH
+    local timerNum = 0
+    if cloneSystem_ and cloneSystem_:IsActive() then
+        timerNum = cloneSystem_:GetCurrentNumber()
+    end
+    nvgFillColor(nvg_, nvgRGBA(80, 200, 240, 255))
+    nvgText(nvg_, contentX, contentY, "⏳")
+    nvgFillColor(nvg_, nvgRGBA(240, 240, 240, 255))
+    if timerNum > 0 then
+        nvgText(nvg_, contentX + iconSz + 4, contentY, "×" .. timerNum .. " 待出发")
+    else
+        nvgText(nvg_, contentX + iconSz + 4, contentY, "全部出发")
+    end
+
+    -- 第3行：金币
+    contentY = contentY + rowH
+    -- 金币图标
+    local coinFrames = spriteFrames_.coin
+    if #coinFrames > 0 and coinFrames[1] and coinFrames[1] ~= 0 then
+        local imgPat = nvgImagePattern(nvg_, contentX, contentY - iconSz/2, iconSz, iconSz, 0, coinFrames[1], 1.0)
+        nvgBeginPath(nvg_)
+        nvgRect(nvg_, contentX, contentY - iconSz/2, iconSz, iconSz)
+        nvgFillPaint(nvg_, imgPat)
+        nvgFill(nvg_)
+    else
+        nvgFillColor(nvg_, nvgRGBA(255, 215, 0, 255))
+        nvgText(nvg_, contentX, contentY, "🪙")
+    end
+    nvgFillColor(nvg_, nvgRGBA(255, 215, 0, 240))
+    nvgText(nvg_, contentX + iconSz + 4, contentY, "×" .. totalCoins_)
+end
+
+function GameScene.DrawGoal()
+    if #goals_ == 0 and not goalArea_ then return end
+    local ppu = GetPixelsPerUnit()
+    local frames = spriteFrames_.portal
+    local hasFrames = #frames > 0
+
+    -- 帧动画索引（6fps旋转速度）
+    local frameIdx = math.floor(spriteAnimTimer_ * 6) % math.max(1, #frames) + 1
+
+    -- 渲染所有终点
+    for _, goal in ipairs(goals_) do
+        local sx, sy = PhysicsToScreen(goal.x, goal.y)
+        sy = sy - ppu * 0.4  -- 向上偏移
+        local drawH = goal.height * ppu * 1.8  -- 放大
+        local drawW = drawH  -- 1:1 正方形帧
+
+        if hasFrames then
+            local imgHandle = frames[frameIdx]
+            if imgHandle and imgHandle ~= 0 then
+                nvgSave(nvg_)
+                local imgPat = nvgImagePattern(nvg_, sx - drawW/2, sy - drawH/2, drawW, drawH, 0, imgHandle, 1.0)
+                nvgBeginPath(nvg_)
+                nvgRect(nvg_, sx - drawW/2, sy - drawH/2, drawW, drawH)
+                nvgFillPaint(nvg_, imgPat)
+                nvgFill(nvg_)
+                nvgRestore(nvg_)
+            end
+        else
+            -- fallback: 简单矩形
+            local pulse = math.sin(os.clock() * 3) * 0.3 + 0.7
+            local alpha = math.floor(pulse * 180)
+            nvgBeginPath(nvg_)
+            nvgRoundedRect(nvg_, sx - drawW/2, sy - drawH/2, drawW, drawH, 4)
+            nvgFillColor(nvg_, nvgRGBA(120, 80, 220, alpha))
+            nvgFill(nvg_)
+        end
+
+        -- 如果 acceptCount > 1，显示数字
+        if goal.acceptCount and goal.acceptCount > 1 then
+            nvgFontFace(nvg_, "sans")
+            nvgFontSize(nvg_, 12)
+            nvgTextAlign(nvg_, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+            nvgFillColor(nvg_, nvgRGBA(255, 255, 255, 230))
+            nvgText(nvg_, sx, sy + drawH/2 + 10, "×" .. goal.acceptCount)
+        end
+    end
 end
 
 function GameScene.DrawCharacters()
-    -- 画主玩家
-    if mainPlayer_ and mainPlayer_.isAlive and mainPlayer_.visible then
-        GameScene.DrawSingleCharacter(mainPlayer_)
+    -- 画主玩家（存活或死亡动画播放中都渲染）
+    if mainPlayer_ and mainPlayer_.visible then
+        if mainPlayer_.isAlive or mainPlayer_.deathTime then
+            GameScene.DrawSingleCharacter(mainPlayer_)
+        end
     end
     -- 画克隆体
     if cloneSystem_ then
         for _, clone in ipairs(cloneSystem_:GetClones()) do
-            if clone.isAlive and clone.visible then
-                GameScene.DrawSingleCharacter(clone)
+            if clone.visible then
+                if clone.isAlive or clone.deathTime then
+                    GameScene.DrawSingleCharacter(clone)
+                end
             end
         end
     end
@@ -943,57 +1657,44 @@ end
 
 function GameScene.DrawTimerUI()
     if not cloneSystem_ then return end
+    if not cloneSystem_:IsActive() then return end
 
-    -- 计算出生点的屏幕坐标（计时器画在玩家下方）
+    -- 出生点屏幕坐标
     local sx, sy = PhysicsToScreen(spawnPos_.x, spawnPos_.y)
-    local cx = sx
-    local cy = sy + 48  -- 玩家脚下
-    local outerR = 26
-    local innerR = 16
+    local ppu = GetPixelsPerUnit()
+    -- 方形尺寸 = 约1个瓦片大小
+    local tileSize = ppu * 0.8
+    local halfSize = tileSize / 2
+    -- 位置：出生点同高度（略偏左）
+    local cx = sx - tileSize * 0.8
+    local cy = sy
 
-    -- 呼吸闪烁
-    local pulse = math.sin(os.clock() * 3) * 0.3 + 0.7
-    local ringC = Config.Colors.TimerRing
+    local progress = cloneSystem_:GetTimerProgress()
+    local num = cloneSystem_:GetCurrentNumber()
 
-    -- 外圈（呼吸闪烁的传送圈）
+    -- 像素风方形背景（深色）
     nvgBeginPath(nvg_)
-    nvgCircle(nvg_, cx, cy, outerR + 6)
-    nvgStrokeWidth(nvg_, 2)
-    nvgStrokeColor(nvg_, nvgRGBA(ringC[1], ringC[2], ringC[3], math.floor(pulse * 140)))
-    nvgStroke(nvg_)
-
-    -- 内圈（呼吸闪烁）
-    nvgBeginPath(nvg_)
-    nvgCircle(nvg_, cx, cy, outerR + 2)
-    nvgStrokeWidth(nvg_, 1.5)
-    nvgStrokeColor(nvg_, nvgRGBA(ringC[1], ringC[2], ringC[3], math.floor(pulse * 80)))
-    nvgStroke(nvg_)
-
-    -- 背景填充圆
-    local bgC = Config.Colors.TimerBg
-    nvgBeginPath(nvg_)
-    nvgCircle(nvg_, cx, cy, outerR)
-    nvgFillColor(nvg_, nvgRGBA(bgC[1], bgC[2], bgC[3], bgC[4]))
+    nvgRect(nvg_, cx - halfSize, cy - halfSize, tileSize, tileSize)
+    nvgFillColor(nvg_, nvgRGBA(20, 20, 40, 210))
     nvgFill(nvg_)
 
-    -- 进度弧
-    if cloneSystem_:IsActive() then
-        local progress = cloneSystem_:GetTimerProgress()
-        local startAngle = -math.pi / 2
-        local endAngle = startAngle + progress * 2 * math.pi
+    -- 2px 像素边框
+    nvgBeginPath(nvg_)
+    nvgRect(nvg_, cx - halfSize, cy - halfSize, tileSize, tileSize)
+    nvgStrokeWidth(nvg_, 2)
+    nvgStrokeColor(nvg_, nvgRGBA(80, 180, 220, 255))
+    nvgStroke(nvg_)
 
-        nvgBeginPath(nvg_)
-        nvgArc(nvg_, cx, cy, outerR - 2, startAngle, endAngle, NVG_CW)
-        nvgArc(nvg_, cx, cy, innerR, endAngle, startAngle, NVG_CCW)
-        nvgClosePath(nvg_)
-        nvgFillColor(nvg_, nvgRGBA(ringC[1], ringC[2], ringC[3], 200))
-        nvgFill(nvg_)
-    end
+    -- 进度条（从底部向上填充）
+    local fillH = tileSize * progress
+    nvgBeginPath(nvg_)
+    nvgRect(nvg_, cx - halfSize + 2, cy + halfSize - fillH - 2, tileSize - 4, fillH)
+    nvgFillColor(nvg_, nvgRGBA(80, 200, 240, 140))
+    nvgFill(nvg_)
 
-    -- 中心数字（倒计时）
-    local num = cloneSystem_:GetCurrentNumber()
+    -- 中心数字
     nvgFontFace(nvg_, "sans")
-    nvgFontSize(nvg_, 20)
+    nvgFontSize(nvg_, tileSize * 0.55)
     nvgTextAlign(nvg_, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
     nvgFillColor(nvg_, nvgRGBA(255, 255, 255, 255))
     nvgText(nvg_, cx, cy, tostring(num))
@@ -1091,24 +1792,141 @@ function GameScene.Resume()
 end
 
 --- 显示暂停菜单
+-- ============================================================================
+-- 教程/帮助弹窗
+-- ============================================================================
+
+function GameScene.ShowTutorial()
+    gameState_ = STATE_PAUSED
+    tutorialUI_ = UI.Panel {
+        width = "100%",
+        height = "100%",
+        justifyContent = "center",
+        alignItems = "center",
+        backgroundColor = { 0, 0, 0, 180 },
+        children = {
+            UI.Panel {
+                width = "90%",
+                maxWidth = 340,
+                padding = 18,
+                gap = 12,
+                alignItems = "center",
+                backgroundColor = { 35, 40, 58, 250 },
+                borderRadius = 14,
+                borderWidth = 2,
+                borderColor = { 80, 140, 255, 100 },
+                children = {
+                    UI.Label {
+                        text = "克隆小猪的故事",
+                        fontSize = 16,
+                        fontWeight = "bold",
+                        fontColor = { 255, 220, 80, 255 },
+                        marginBottom = 4,
+                    },
+                    UI.Label {
+                        text = "早就听说海滩尽头风景格外漂亮，小猪心里满是向往，独自出发前往。一路上障碍不少，单靠自己走起来格外吃力。\n\n好在它意外学会了神奇的克隆术，只要倒数五四三二一，就能唤来一群一模一样的伙伴。这些克隆小猪会跟着它同步行动，一路结伴同行。\n\n现在就由你来指挥这支队伍，穿过沙滩，一起走到旅途的终点吧！",
+                        fontSize = 10,
+                        fontColor = { 220, 225, 240, 255 },
+                        textAlign = "left",
+                        width = "100%",
+                    },
+                    UI.Button {
+                        text = "我已经知道了！！！",
+                        width = "80%", maxWidth = 180,
+                        height = 64,
+                        backgroundImage = WOODEN_BTN.image,
+                        backgroundFit = WOODEN_BTN.fit,
+                        backgroundSlice = WOODEN_BTN.slice,
+                        backgroundColor = WOODEN_BTN.bgColor,
+                        boxShadow = WOODEN_BTN.shadow,
+                        fontColor = WOODEN_BTN.textColor,
+                        fontWeight = WOODEN_BTN.fontWeight,
+                        fontSize = 11,
+                        borderWidth = 0,
+                        marginTop = 4,
+                        onClick = function(self)
+                            UIScenes.PlayUIClick()
+                            GameScene.HideTutorial()
+                        end,
+                    },
+                },
+            },
+        },
+    }
+    UI.SetRoot(tutorialUI_)
+
+    -- 标记已看过教程
+    if not tutorialSeen_ then
+        tutorialSeen_ = true
+        clientCloud:Set(TUTORIAL_CLOUD_KEY, "1", {
+            onComplete = function(success)
+                print("[GameScene] Tutorial seen flag saved: " .. tostring(success))
+            end,
+        })
+    end
+end
+
+function GameScene.HideTutorial()
+    tutorialUI_ = nil
+    gameState_ = STATE_PLAYING
+    UI.SetRoot(hudUI_)
+end
+
 function GameScene.ShowPauseMenu()
     -- 构建按钮列表
     local buttons = {}
     buttons[#buttons + 1] = UI.Button {
         text = "返回游戏",
-        variant = "primary",
-        width = "80%", maxWidth = 200,
-        height = 36,
+        width = "80%", maxWidth = 150,
+        height = 72,
+        backgroundImage = WOODEN_BTN.image,
+        backgroundFit = WOODEN_BTN.fit,
+        backgroundSlice = WOODEN_BTN.slice,
+        backgroundColor = WOODEN_BTN.bgColor,
+        boxShadow = WOODEN_BTN.shadow,
+        fontColor = WOODEN_BTN.textColor,
+        fontWeight = WOODEN_BTN.fontWeight,
+        fontSize = 11,
+        borderWidth = 0,
         onClick = function(self)
+            UIScenes.PlayUIClick()
             GameScene.Resume()
         end,
     }
     buttons[#buttons + 1] = UI.Button {
-        text = "重置关卡",
-        variant = "outline",
-        width = "80%", maxWidth = 200,
-        height = 34,
+        text = "帮助",
+        width = "80%", maxWidth = 150,
+        height = 72,
+        backgroundImage = WOODEN_BTN.image,
+        backgroundFit = WOODEN_BTN.fit,
+        backgroundSlice = WOODEN_BTN.slice,
+        backgroundColor = WOODEN_BTN.bgColor,
+        boxShadow = WOODEN_BTN.shadow,
+        fontColor = WOODEN_BTN.textColor,
+        fontWeight = WOODEN_BTN.fontWeight,
+        fontSize = 11,
+        borderWidth = 0,
         onClick = function(self)
+            UIScenes.PlayUIClick()
+            GameScene.HidePauseMenu()
+            GameScene.ShowTutorial()
+        end,
+    }
+    buttons[#buttons + 1] = UI.Button {
+        text = "重置关卡",
+        width = "80%", maxWidth = 150,
+        height = 72,
+        backgroundImage = WOODEN_BTN.image,
+        backgroundFit = WOODEN_BTN.fit,
+        backgroundSlice = WOODEN_BTN.slice,
+        backgroundColor = WOODEN_BTN.bgColor,
+        boxShadow = WOODEN_BTN.shadow,
+        fontColor = WOODEN_BTN.textColor,
+        fontWeight = WOODEN_BTN.fontWeight,
+        fontSize = 11,
+        borderWidth = 0,
+        onClick = function(self)
+            UIScenes.PlayUIClick()
             GameScene.HidePauseMenu()
             GameScene.Exit()
             GameScene.Enter({ level = currentLevel_ })
@@ -1117,10 +1935,19 @@ function GameScene.ShowPauseMenu()
     if fromEditor_ then
         buttons[#buttons + 1] = UI.Button {
             text = "返回编辑器",
-            variant = "primary",
-            width = "80%", maxWidth = 200,
-            height = 34,
+            width = "80%", maxWidth = 150,
+            height = 72,
+            backgroundImage = WOODEN_BTN.image,
+            backgroundFit = WOODEN_BTN.fit,
+            backgroundSlice = WOODEN_BTN.slice,
+            backgroundColor = WOODEN_BTN.bgColor,
+            boxShadow = WOODEN_BTN.shadow,
+            fontColor = WOODEN_BTN.textColor,
+            fontWeight = WOODEN_BTN.fontWeight,
+            fontSize = 11,
+            borderWidth = 0,
             onClick = function(self)
+                UIScenes.PlayUIClick()
                 GameScene.HidePauseMenu()
                 SceneManager.SwitchTo(SceneManager.SCENE_EDITOR, { fromTest = true })
             end,
@@ -1128,10 +1955,19 @@ function GameScene.ShowPauseMenu()
     end
     buttons[#buttons + 1] = UI.Button {
         text = "返回主菜单",
-        variant = "outline",
-        width = "80%", maxWidth = 200,
-        height = 34,
+        width = "80%", maxWidth = 150,
+        height = 72,
+        backgroundImage = WOODEN_BTN.image,
+        backgroundFit = WOODEN_BTN.fit,
+        backgroundSlice = WOODEN_BTN.slice,
+        backgroundColor = WOODEN_BTN.bgColor,
+        boxShadow = WOODEN_BTN.shadow,
+        fontColor = WOODEN_BTN.textColor,
+        fontWeight = WOODEN_BTN.fontWeight,
+        fontSize = 11,
+        borderWidth = 0,
         onClick = function(self)
+            UIScenes.PlayUIClick()
             GameScene.HidePauseMenu()
             SceneManager.SwitchTo(SceneManager.SCENE_TITLE)
         end,
@@ -1162,7 +1998,7 @@ function GameScene.ShowPauseMenu()
                         value = Config.Settings.MusicVolume * 100,
                         min = 0, max = 100,
                         flexGrow = 1,
-                        onChange = function(self, val) Config.Settings.MusicVolume = val / 100 end,
+                        onChange = function(self, val) BGM.SetVolume(val / 100) end,
                     },
                 }
             },

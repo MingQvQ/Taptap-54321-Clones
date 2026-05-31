@@ -147,7 +147,11 @@ local function DrawSpawnPoint(vg, cx, cy, cellSize, info)
 end
 
 --- 渲染单个预制体类型图层
-local function DrawPrefabLayer(vg, layer, layout)
+---@param vg userdata
+---@param layer table
+---@param layout table
+---@param layerIdx number 图层索引（用于读取旋转数据）
+local function DrawPrefabLayer(vg, layer, layout, layerIdx)
     local cellSize = layout.cellSize
     local ox = layout.offsetX
     local oy = layout.offsetY
@@ -161,30 +165,94 @@ local function DrawPrefabLayer(vg, layer, layout)
                 local cx = ox + (col - 1) * cellSize
                 local cy = oy + (row - 1) * cellSize
 
+                -- 获取旋转角度
+                local rotation = TilemapData.GetRotation(layerIdx, row, col)
+
                 -- 玩家出生点：特殊绘制（圆圈+数字）
                 if info.tag == "player_spawn" then
                     DrawSpawnPoint(vg, cx, cy, cellSize, info)
+                elseif info.image then
+                    -- 有图片的预制体（装饰类）：绘制图片
+                    local imgHandle = GetOrLoadImage(vg, info.image)
+                    if imgHandle then
+                        -- 应用旋转渲染
+                        if rotation ~= 0 then
+                            nvgSave(vg)
+                            nvgTranslate(vg, cx + cellSize * 0.5, cy + cellSize * 0.5)
+                            nvgRotate(vg, math.rad(rotation))
+                            local paint = nvgImagePattern(vg, -cellSize * 0.5, -cellSize * 0.5, cellSize, cellSize, 0, imgHandle, 1.0)
+                            nvgBeginPath(vg)
+                            nvgRect(vg, -cellSize * 0.5, -cellSize * 0.5, cellSize, cellSize)
+                            nvgFillPaint(vg, paint)
+                            nvgFill(vg)
+                            nvgRestore(vg)
+                        else
+                            local paint = nvgImagePattern(vg, cx, cy, cellSize, cellSize, 0, imgHandle, 1.0)
+                            nvgBeginPath(vg)
+                            nvgRect(vg, cx, cy, cellSize, cellSize)
+                            nvgFillPaint(vg, paint)
+                            nvgFill(vg)
+                        end
+                    else
+                        -- 图片加载失败，fallback 色块
+                        local c = info.color
+                        nvgBeginPath(vg)
+                        nvgRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4)
+                        nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.6)))
+                        nvgFill(vg)
+                    end
                 else
-                    -- 半透明背景
-                    local c = info.color
-                    nvgBeginPath(vg)
-                    nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
-                    nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.6)))
-                    nvgFill(vg)
+                    -- 带旋转的图标渲染（尖刺等）
+                    if rotation ~= 0 then
+                        nvgSave(vg)
+                        nvgTranslate(vg, cx + cellSize * 0.5, cy + cellSize * 0.5)
+                        nvgRotate(vg, math.rad(rotation))
 
-                    -- 边框
-                    nvgBeginPath(vg)
-                    nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
-                    nvgStrokeColor(vg, nvgRGBA(c[1], c[2], c[3], 220))
-                    nvgStrokeWidth(vg, 1.5)
-                    nvgStroke(vg)
+                        -- 半透明背景
+                        local c = info.color
+                        nvgBeginPath(vg)
+                        nvgRoundedRect(vg, -cellSize * 0.5 + 2, -cellSize * 0.5 + 2, cellSize - 4, cellSize - 4, 4)
+                        nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.6)))
+                        nvgFill(vg)
 
-                    -- 图标
-                    if info.icon and info.icon ~= "" then
-                        nvgFontSize(vg, cellSize * 0.55)
-                        nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
-                        nvgFillColor(vg, nvgRGBA(255, 255, 255, 240))
-                        nvgText(vg, cx + cellSize * 0.5, cy + cellSize * 0.5, info.icon)
+                        -- 边框
+                        nvgBeginPath(vg)
+                        nvgRoundedRect(vg, -cellSize * 0.5 + 2, -cellSize * 0.5 + 2, cellSize - 4, cellSize - 4, 4)
+                        nvgStrokeColor(vg, nvgRGBA(c[1], c[2], c[3], 220))
+                        nvgStrokeWidth(vg, 1.5)
+                        nvgStroke(vg)
+
+                        -- 图标
+                        if info.icon and info.icon ~= "" then
+                            nvgFontSize(vg, cellSize * 0.55)
+                            nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+                            nvgFillColor(vg, nvgRGBA(255, 255, 255, 240))
+                            nvgText(vg, 0, 0, info.icon)
+                        end
+
+                        nvgRestore(vg)
+                    else
+                        -- 半透明背景
+                        local c = info.color
+                        nvgBeginPath(vg)
+                        nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
+                        nvgFillColor(vg, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.6)))
+                        nvgFill(vg)
+
+                        -- 边框
+                        nvgBeginPath(vg)
+                        nvgRoundedRect(vg, cx + 2, cy + 2, cellSize - 4, cellSize - 4, 4)
+                        nvgStrokeColor(vg, nvgRGBA(c[1], c[2], c[3], 220))
+                        nvgStrokeWidth(vg, 1.5)
+                        nvgStroke(vg)
+
+                        -- 图标
+                        if info.icon and info.icon ~= "" then
+                            nvgFontSize(vg, cellSize * 0.55)
+                            nvgTextAlign(vg, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+                            nvgFillColor(vg, nvgRGBA(255, 255, 255, 240))
+                            nvgText(vg, cx + cellSize * 0.5, cy + cellSize * 0.5, info.icon)
+                        end
                     end
                 end
             end
@@ -215,7 +283,7 @@ function TilemapRenderer.Draw(vg, layout)
             if layer.type == "tile" then
                 DrawTileLayer(vg, layer, layout)
             elseif layer.type == "prefab" then
-                DrawPrefabLayer(vg, layer, layout)
+                DrawPrefabLayer(vg, layer, layout, layerIdx)
             end
         end
     end

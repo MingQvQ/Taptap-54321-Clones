@@ -1,7 +1,7 @@
 -- ============================================================================
 -- UIScenes.lua - UI 界面模块
 -- 包含：开始游戏界面（滚动天空背景）、关卡选择界面（JSON配置）、设置界面
--- 使用 urhox-libs/UI 控件库
+-- 使用 urhox-libs/UI 控件库 - PixelForge 像素风格
 -- ============================================================================
 
 local UI = require("urhox-libs/UI")
@@ -9,9 +9,72 @@ local tween = require("tween")
 local Config = require("Config")
 local SceneManager = require("SceneManager")
 local LevelData = require("LevelData")
+local BGM = require("BGM")
 
 
 local UIScenes = {}
+
+-- ============================================================================
+-- UI 点击音效（全局共享）
+-- ============================================================================
+local uiClickNode_ = nil
+local uiClickSource_ = nil
+local uiClickSound_ = nil
+
+local function InitUIClickSound()
+    if uiClickNode_ then return end
+    uiClickNode_ = scene_ and scene_:CreateChild("UIClickSFX") or nil
+    if not uiClickNode_ then
+        -- 创建一个临时 scene 用于 UI 音效
+        local tmpScene = Scene()
+        uiClickNode_ = tmpScene:CreateChild("UIClickSFX")
+    end
+    uiClickSource_ = uiClickNode_:CreateComponent("SoundSource")
+    uiClickSource_:SetSoundType("Effect")
+    uiClickSound_ = cache:GetResource("Sound", "audio/sfx/ui_click.ogg")
+end
+
+local function PlayUIClick()
+    if not uiClickSource_ then InitUIClickSound() end
+    if uiClickSound_ and uiClickSource_ then
+        local masterSfx = Config.Settings.SFXVolume or 0.4
+        uiClickSource_:Play(uiClickSound_, uiClickSound_.frequency, 0.8 * masterSfx)
+    end
+end
+
+-- 导出供其他模块使用
+UIScenes.PlayUIClick = PlayUIClick
+
+-- ============================================================================
+-- PixelForge 像素风格主题色
+-- ============================================================================
+local PF = {
+    bg       = { 15, 15, 35, 255 },        -- 深色背景
+    surface  = { 27, 27, 58, 255 },        -- 面板背景
+    surfaceH = { 37, 37, 80, 255 },        -- 面板悬浮
+    primary  = { 33, 189, 174, 255 },      -- 主色 Teal
+    primaryP = { 25, 168, 153, 255 },      -- 主色按下
+    secondary = { 108, 92, 231, 255 },     -- 副色 紫
+    text     = { 240, 240, 240, 255 },     -- 主文字
+    textSec  = { 160, 160, 192, 255 },     -- 副文字
+    border   = { 58, 58, 106, 255 },       -- 边框
+    danger   = { 255, 71, 87, 255 },       -- 红
+    gold     = { 255, 217, 61, 255 },      -- 金
+    shadow   = { 10, 10, 26, 204 },        -- 阴影
+}
+
+-- ============================================================================
+-- 木板告示牌按钮公共样式（九宫格拉伸）
+-- ============================================================================
+local WOODEN_BTN = {
+    image = "image/wooden_btn.png",
+    slice = {12, 10, 12, 10},        -- top, right, bottom, left (像素) - 透明背景版
+    fit = "sliced",
+    textColor = {55, 28, 5, 255},    -- 深棕色文字，木板上清晰
+    fontWeight = "bold",
+    bgColor = {0, 0, 0, 0},          -- 按钮本身透明
+    shadow = {},                       -- 无阴影
+}
 
 -- ============================================================================
 -- 通用 Tween 动画管理（跨场景共享）
@@ -59,128 +122,60 @@ local function ClearAllTweens()
 end
 
 -- ============================================================================
--- 开始游戏界面 (Title Screen) - 滚动天空背景 + 克隆人标题
+-- 开始游戏界面 (Title Screen) - 像素风封面
 -- ============================================================================
 
 local TitleScene = {}
 
----@type NVGContextWrapper
-local titleNvg_ = nil
-
--- 3D 透视云朵系统
-local cloudImages_ = {}       -- NanoVG image handles (数组)
-local cloudImgSizes_ = {}     -- { {w,h}, ... } 每张图原始尺寸
-local cloudParticles_ = {}    -- 云朵粒子列表
-local CLOUD_COUNT = 18        -- 同屏云朵数
-local CLOUD_SPEED = 60        -- 基础前进速度（像素/秒）
-local CLOUD_Z_MIN = 0.1       -- 最远处 Z（最小缩放）
-local CLOUD_Z_MAX = 1.2       -- 最近处 Z（最大缩放）
-
--- 天空渐变色
-local SKY_TOP = { 90, 160, 255 }
-local SKY_BOTTOM = { 200, 230, 255 }
-
---- 生成/重置一个云朵粒子
-local function SpawnCloud(p, screenW, screenH, randomZ)
-    p.imgIdx = math.random(1, #cloudImages_)
-    if randomZ then
-        p.z = CLOUD_Z_MIN + math.random() * (CLOUD_Z_MAX - CLOUD_Z_MIN)
-    else
-        p.z = CLOUD_Z_MIN  -- 新生成的从最远处开始
-    end
-    -- 随机水平位置（基于屏幕宽度，考虑缩放后可能超出）
-    local spread = screenW * 0.8
-    p.x = (math.random() - 0.5) * spread
-    -- 垂直位置：远处的靠近地平线（中心偏上），近处的分散
-    p.y = (math.random() - 0.5) * screenH * 0.4 - screenH * 0.1
-    return p
-end
-
 function TitleScene.Enter(params)
-    -- 创建 NanoVG 上下文
-    titleNvg_ = nvgCreate(1)
-
-    -- 加载云朵精灵图（最近邻采样保持像素风格）
-    local IMG_FLAGS = 32  -- NVG_IMAGE_NEAREST
-    local cloudFiles = {
-        "image/cloud_sprite_1_20260530131000.png",
-        "image/cloud_sprite_2_20260530131006.png",
-        "image/cloud_sprite_3_20260530131019.png",
-    }
-    cloudImages_ = {}
-    cloudImgSizes_ = {}
-    for i, f in ipairs(cloudFiles) do
-        local img = nvgCreateImage(titleNvg_, f, IMG_FLAGS)
-        if img and img ~= 0 then
-            local w, h = nvgImageSize(titleNvg_, img)
-            table.insert(cloudImages_, img)
-            table.insert(cloudImgSizes_, { w = w, h = h })
-        end
-    end
-
-    -- 初始化云朵粒子（随机分布在不同深度）
-    local screenW = graphics:GetWidth() / graphics:GetDPR()
-    local screenH = graphics:GetHeight() / graphics:GetDPR()
-    cloudParticles_ = {}
-    math.randomseed(os.time())
-    for i = 1, CLOUD_COUNT do
-        local p = {}
-        SpawnCloud(p, screenW, screenH, true)  -- true = 随机Z深度
-        table.insert(cloudParticles_, p)
-    end
-
     -- 注册事件
     SubscribeToEvent("Update", "TitleScene_HandleUpdate")
-    SubscribeToEvent(titleNvg_, "NanoVGRender", "TitleScene_HandleRender")
 
-    -- UI 层 - 标题 + 按钮
+    -- 重置编辑器按钮状态
+    TitleScene._editorContainer = nil
+    TitleScene._editorVisible = false
+
+    -- UI 层 - 像素风标题 + 按钮（封面背景图）
     local root = UI.Panel {
         width = "100%",
         height = "100%",
         justifyContent = "center",
         alignItems = "center",
+        backgroundImage = "image/edited_game_cover_beach_v3_20260530211652.png",
+        backgroundFit = "cover",
         children = {
+            -- 主内容区（无背景框）
             UI.Panel {
-                width = "90%",
-                maxWidth = 360,
-                padding = 30,
-                gap = 16,
+                gap = 12,
                 alignItems = "center",
-                backgroundColor = { 0, 0, 0, 120 },
-                borderRadius = 20,
                 children = {
-                    -- 克隆人角色图标
+                    -- 游戏 Logo
                     UI.Panel {
-                        width = 100,
-                        height = 100,
-                        backgroundImage = "image/clone_character_20260530074154.png",
+                        width = 300,
+                        height = 300,
+                        backgroundImage = "image/clone_piggy_logo_v3_20260531004006.png",
                         backgroundFit = "contain",
                     },
-                    -- 游戏标题
-                    UI.Label {
-                        text = "影子伙伴",
-                        fontSize = 42,
-                        fontWeight = "bold",
-                        fontColor = { 255, 255, 255, 255 },
-                    },
-                    UI.Label {
-                        text = "SHADOW PARTNER",
-                        fontSize = 14,
-                        fontColor = { 200, 220, 255, 180 },
-                    },
-                    -- 间隔
-                    UI.Panel { height = 16 },
-                    -- 开始按钮（带 tween 动画）
+                    -- 开始按钮（像素风）
                     (function()
                         local proxy = { scale = 1.0 }
                         return UI.Button {
                             text = "开始游戏",
-                            variant = "primary",
-                            width = 200,
-                            height = 48,
+                            size = "xl",
+                            width = 150,
+                            height = 100,
+                            backgroundImage = WOODEN_BTN.image,
+                            backgroundFit = WOODEN_BTN.fit,
+                            backgroundSlice = WOODEN_BTN.slice,
+                            backgroundColor = WOODEN_BTN.bgColor,
+                            boxShadow = WOODEN_BTN.shadow,
+                            fontColor = WOODEN_BTN.textColor,
+                            fontWeight = WOODEN_BTN.fontWeight,
+                            fontSize = 12,
+                            borderWidth = 0,
                             scale = 1.0,
                             onPointerEnter = function(ev, self)
-                                AnimateScale(self, proxy, 1.1, "outBack", 0.2)
+                                AnimateScale(self, proxy, 1.08, "outBack", 0.2)
                             end,
                             onPointerLeave = function(ev, self)
                                 AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
@@ -189,24 +184,34 @@ function TitleScene.Enter(params)
                                 AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
                             end,
                             onPointerUp = function(ev, self)
-                                AnimateScale(self, proxy, 1.1, "outBack", 0.15)
+                                AnimateScale(self, proxy, 1.08, "outBack", 0.15)
                             end,
                             onClick = function(self)
+                                PlayUIClick()
                                 SceneManager.SwitchTo(SceneManager.SCENE_LEVEL_SELECT)
                             end,
                         }
                     end)(),
-                    -- 设置按钮（带 tween 动画）
+                    -- 设置按钮（像素风）
                     (function()
                         local proxy = { scale = 1.0 }
                         return UI.Button {
                             text = "设置",
-                            variant = "outline",
-                            width = 200,
-                            height = 44,
+                            size = "xl",
+                            width = 150,
+                            height = 100,
+                            backgroundImage = WOODEN_BTN.image,
+                            backgroundFit = WOODEN_BTN.fit,
+                            backgroundSlice = WOODEN_BTN.slice,
+                            backgroundColor = WOODEN_BTN.bgColor,
+                            boxShadow = WOODEN_BTN.shadow,
+                            fontColor = WOODEN_BTN.textColor,
+                            fontWeight = WOODEN_BTN.fontWeight,
+                            fontSize = 12,
+                            borderWidth = 0,
                             scale = 1.0,
                             onPointerEnter = function(ev, self)
-                                AnimateScale(self, proxy, 1.1, "outBack", 0.2)
+                                AnimateScale(self, proxy, 1.08, "outBack", 0.2)
                             end,
                             onPointerLeave = function(ev, self)
                                 AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
@@ -215,68 +220,93 @@ function TitleScene.Enter(params)
                                 AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
                             end,
                             onPointerUp = function(ev, self)
-                                AnimateScale(self, proxy, 1.1, "outBack", 0.15)
+                                AnimateScale(self, proxy, 1.08, "outBack", 0.15)
                             end,
                             onClick = function(self)
+                                PlayUIClick()
                                 SceneManager.SwitchTo(SceneManager.SCENE_SETTINGS)
                             end,
                         }
                     end)(),
-                    -- 关卡编辑器按钮（带 tween 动画）
+                    -- 关卡编辑器按钮容器（默认隐藏，按L键显示）
                     (function()
                         local proxy = { scale = 1.0 }
-                        return UI.Button {
-                            text = "关卡编辑器",
-                            variant = "outline",
-                            width = 200,
-                            height = 44,
-                            scale = 1.0,
-                            onPointerEnter = function(ev, self)
-                                AnimateScale(self, proxy, 1.1, "outBack", 0.2)
-                            end,
-                            onPointerLeave = function(ev, self)
-                                AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
-                            end,
-                            onPointerDown = function(ev, self)
-                                AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
-                            end,
-                            onPointerUp = function(ev, self)
-                                AnimateScale(self, proxy, 1.1, "outBack", 0.15)
-                            end,
-                            onClick = function(self)
-                                SceneManager.SwitchTo(SceneManager.SCENE_EDITOR)
-                            end,
+                        local container = UI.Panel {
+                            width = 150,
+                            height = 0,
+                            overflow = "hidden",
+                            alignItems = "center",
+                            children = {
+                                UI.Button {
+                                    text = "关卡编辑器",
+                                    size = "xl",
+                                    width = 150,
+                                    height = 100,
+                                    backgroundImage = WOODEN_BTN.image,
+                                    backgroundFit = WOODEN_BTN.fit,
+                                    backgroundSlice = WOODEN_BTN.slice,
+                                    backgroundColor = WOODEN_BTN.bgColor,
+                                    boxShadow = WOODEN_BTN.shadow,
+                                    fontColor = WOODEN_BTN.textColor,
+                                    fontWeight = WOODEN_BTN.fontWeight,
+                                    fontSize = 12,
+                                    borderWidth = 0,
+                                    scale = 1.0,
+                                    onPointerEnter = function(ev, self)
+                                        AnimateScale(self, proxy, 1.08, "outBack", 0.2)
+                                    end,
+                                    onPointerLeave = function(ev, self)
+                                        AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
+                                    end,
+                                    onPointerDown = function(ev, self)
+                                        AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
+                                    end,
+                                    onPointerUp = function(ev, self)
+                                        AnimateScale(self, proxy, 1.08, "outBack", 0.15)
+                                    end,
+                                    onClick = function(self)
+                                        PlayUIClick()
+                                        SceneManager.SwitchTo(SceneManager.SCENE_EDITOR)
+                                    end,
+                                },
+                            }
                         }
+                        TitleScene._editorContainer = container
+                        return container
                     end)(),
-                    -- 版本号
-                    UI.Panel { height = 6 },
+                }
+            },
+            -- 右下角版本号和作者
+            UI.Panel {
+                position = "absolute",
+                bottom = 12,
+                right = 12,
+                alignItems = "flex-end",
+                gap = 2,
+                children = {
+                    UI.Label {
+                        text = "By DimSum",
+                        fontSize = 10,
+                        fontColor = { 240, 240, 240, 200 },
+                    },
                     UI.Label {
                         text = "v" .. Config.Version,
-                        fontSize = 12,
-                        fontColor = { 200, 210, 230, 150 },
+                        fontSize = 10,
+                        fontColor = { 240, 240, 240, 160 },
                     },
                 }
-            }
+            },
         }
     }
     UI.SetRoot(root)
+
+    -- 编辑器按钮容器初始高度=0，已隐藏
 end
 
 function TitleScene.Exit()
-    -- 清除事件
     UnsubscribeFromEvent("Update")
-    if titleNvg_ then
-        UnsubscribeFromEvent(titleNvg_, "NanoVGRender")
-        for _, img in ipairs(cloudImages_) do
-            nvgDeleteImage(titleNvg_, img)
-        end
-    end
-    cloudImages_ = {}
-    cloudImgSizes_ = {}
-    cloudParticles_ = {}
     ClearAllTweens()
     UI.SetRoot(nil)
-    titleNvg_ = nil
 end
 
 SceneManager.Register(SceneManager.SCENE_TITLE, TitleScene)
@@ -284,99 +314,25 @@ SceneManager.Register(SceneManager.SCENE_TITLE, TitleScene)
 -- Title 全局事件回调
 function TitleScene_HandleUpdate(eventType, eventData)
     local dt = eventData["TimeStep"]:GetFloat()
-
-    local screenW = graphics:GetWidth() / graphics:GetDPR()
-    local screenH = graphics:GetHeight() / graphics:GetDPR()
-
-    -- 更新云朵粒子：Z 递增（从远到近）
-    for _, p in ipairs(cloudParticles_) do
-        -- Z 越大 = 越近，速度也越快（透视加速）
-        local speedMul = 0.3 + p.z * 0.7
-        p.z = p.z + CLOUD_SPEED * speedMul * dt * 0.01
-
-        -- 超过最大 Z（飞出屏幕）→ 重置到远处
-        if p.z > CLOUD_Z_MAX then
-            SpawnCloud(p, screenW, screenH, false)
-        end
-    end
-
-    -- 驱动按钮 tween 动画
     UpdateTweens(dt)
-end
+    BGM.Tick()
 
-function TitleScene_HandleRender(eventType, eventData)
-    if not titleNvg_ then return end
-    if #cloudImages_ == 0 then return end
-
-    local screenW = graphics:GetWidth()
-    local screenH = graphics:GetHeight()
-    local dpr = graphics:GetDPR()
-    local logW = screenW / dpr
-    local logH = screenH / dpr
-
-    nvgBeginFrame(titleNvg_, logW, logH, dpr)
-
-    -- 绘制天空渐变背景
-    local skyPaint = nvgLinearGradient(titleNvg_, 0, 0, 0, logH,
-        nvgRGBA(SKY_TOP[1], SKY_TOP[2], SKY_TOP[3], 255),
-        nvgRGBA(SKY_BOTTOM[1], SKY_BOTTOM[2], SKY_BOTTOM[3], 255))
-    nvgBeginPath(titleNvg_)
-    nvgRect(titleNvg_, 0, 0, logW, logH)
-    nvgFillPaint(titleNvg_, skyPaint)
-    nvgFill(titleNvg_)
-
-    -- 按 Z 排序（远的先画，近的后画）
-    local sorted = {}
-    for i, p in ipairs(cloudParticles_) do
-        sorted[i] = p
-    end
-    table.sort(sorted, function(a, b) return a.z < b.z end)
-
-    -- 绘制每朵云
-    local cx = logW * 0.5  -- 屏幕中心（消失点）
-    local cy = logH * 0.45 -- 消失点略偏上
-
-    for _, p in ipairs(sorted) do
-        local imgIdx = p.imgIdx
-        if imgIdx and cloudImages_[imgIdx] then
-            local imgW = cloudImgSizes_[imgIdx].w
-            local imgH = cloudImgSizes_[imgIdx].h
-
-            -- 透视缩放：Z 越大（越近）显示越大
-            local scale = p.z * 1.5
-
-            -- 透视位移：从消失点向外扩散
-            local drawX = cx + p.x * p.z
-            local drawY = cy + p.y * p.z
-
-            -- 计算绘制尺寸
-            local dw = imgW * scale
-            local dh = imgH * scale
-
-            -- 透明度：远处淡，近处清晰
-            local alpha = math.min(1.0, p.z / CLOUD_Z_MAX * 1.2)
-            -- 超近处也渐隐（飞出屏幕效果）
-            if p.z > CLOUD_Z_MAX * 0.85 then
-                local fadeOut = (CLOUD_Z_MAX - p.z) / (CLOUD_Z_MAX * 0.15)
-                alpha = alpha * math.max(0, fadeOut)
+    -- 按 L 键切换显示关卡编辑器按钮
+    if input:GetKeyPress(KEY_L) then
+        local container = TitleScene._editorContainer
+        if container then
+            if TitleScene._editorVisible then
+                container:SetStyle({ height = 0 })
+                TitleScene._editorVisible = false
+            else
+                container:SetStyle({ height = 100 })
+                TitleScene._editorVisible = true
             end
-
-            -- 绘制云朵
-            nvgSave(titleNvg_)
-            nvgGlobalAlpha(titleNvg_, alpha)
-            local paint = nvgImagePattern(titleNvg_,
-                drawX - dw * 0.5, drawY - dh * 0.5,
-                dw, dh, 0, cloudImages_[imgIdx], 1.0)
-            nvgBeginPath(titleNvg_)
-            nvgRect(titleNvg_, drawX - dw * 0.5, drawY - dh * 0.5, dw, dh)
-            nvgFillPaint(titleNvg_, paint)
-            nvgFill(titleNvg_)
-            nvgRestore(titleNvg_)
         end
     end
-
-    nvgEndFrame(titleNvg_)
 end
+
+
 
 -- ============================================================================
 -- 关卡选择界面 (Level Select)
@@ -418,11 +374,11 @@ local DEFAULT_LEVEL_POSITIONS = {
     { row = 2, col = 7 },  -- 关卡10: 右(终点)
 }
 
--- 默认样式
+-- 默认样式（像素风）
 local DEFAULT_STYLE = {
-    unlocked = { backgroundColor = { 180, 40, 50, 255 }, borderColor = { 0, 0, 0, 255 }, textColor = { 255, 255, 255, 255 } },
-    locked = { backgroundColor = { 0, 0, 0, 0 }, borderColor = { 255, 255, 255, 150 }, icon = "🔒" },
-    connection = { color = { 255, 255, 255, 150 }, thickness = 3 },
+    unlocked = { backgroundColor = PF.primary, borderColor = PF.primaryP, textColor = PF.text },
+    locked = { backgroundColor = { 0, 0, 0, 0 }, borderColor = PF.border, icon = "🔒" },
+    connection = { color = PF.textSec, thickness = 3 },
 }
 
 --- 创建关卡节点
@@ -441,7 +397,7 @@ local function CreateLevelNode(index, unlocked, nodeSize, style)
             justifyContent = "center",
             alignItems = "center",
             backgroundColor = bgColor,
-            borderRadius = 6,
+            borderRadius = 0,
             borderWidth = 2,
             borderColor = bdColor,
             scale = 1.0,
@@ -450,24 +406,24 @@ local function CreateLevelNode(index, unlocked, nodeSize, style)
             end,
             onPointerLeave = function(ev, self)
                 AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
-                -- 恢复颜色
                 self:SetProp("backgroundColor", bgColor)
             end,
             onPointerDown = function(ev, self)
                 AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
-                self:SetProp("backgroundColor", { 120, 120, 120, 255 })
+                self:SetProp("backgroundColor", PF.surfaceH)
             end,
             onPointerUp = function(ev, self)
                 AnimateScale(self, proxy, 1.1, "outBack", 0.15)
                 self:SetProp("backgroundColor", bgColor)
             end,
             onClick = function(self)
+                PlayUIClick()
                 SceneManager.SwitchTo(SceneManager.SCENE_GAME, { level = index })
             end,
             children = {
                 UI.Label {
                     text = tostring(index),
-                    fontSize = 22,
+                    fontSize = math.floor(nodeSize * 0.42),
                     fontWeight = "bold",
                     fontColor = txtColor,
                 },
@@ -483,13 +439,13 @@ local function CreateLevelNode(index, unlocked, nodeSize, style)
             justifyContent = "center",
             alignItems = "center",
             backgroundColor = bgColor,
-            borderRadius = 6,
+            borderRadius = 0,
             borderWidth = 2,
             borderColor = bdColor,
             children = {
                 UI.Label {
                     text = icon,
-                    fontSize = 20,
+                    fontSize = math.floor(nodeSize * 0.38),
                 },
             }
         }
@@ -504,7 +460,7 @@ local function CreateHLine(gapWidth, style)
     return UI.Panel {
         width = gapWidth, height = thickness,
         backgroundColor = color,
-        borderRadius = 1,
+        borderRadius = 0,
         alignSelf = "center",
     }
 end
@@ -522,7 +478,7 @@ local function CreateVLine(nodeSize, gapHeight, style)
             UI.Panel {
                 width = thickness, height = gapHeight,
                 backgroundColor = color,
-                borderRadius = 1,
+                borderRadius = 0,
             },
         }
     }
@@ -572,23 +528,41 @@ end
 
 function LevelSelectScene.Enter(params)
     local levelCount = LevelData.GetLevelCount()
-    local unlockedCount = levelCount  -- 目前全部解锁
+    local Progress = require("Progress")
+    local unlockedCount = math.min(Progress.GetUnlockedLevel(), levelCount)
+
+    -- 暂时只显示前5关（后续关卡隐藏，不是删除）
+    local MAX_VISIBLE_LEVELS = 5
+    levelCount = math.min(levelCount, MAX_VISIBLE_LEVELS)
+    unlockedCount = math.min(unlockedCount, MAX_VISIBLE_LEVELS)
 
     -- 加载 JSON 配置
     local config = LoadLevelSelectConfig()
     local gridRows = 2
     local gridCols = 7
-    local nodeSize = 52
-    local gapSize = 20
+    local baseNodeSize = 52
+    local baseGapSize = 20
     local levelPositions = DEFAULT_LEVEL_POSITIONS
+
+    -- 1.5倍缩放，根据屏幕宽度自适应
+    local screenW = graphics:GetWidth() / graphics:GetDPR()
+    local scaleFactor = 1.5
+    -- 确保放大后不会超出屏幕（预留左右边距40px）
+    local maxGridWidth = screenW - 40
+    local nodeSize = math.floor(baseNodeSize * scaleFactor)
+    local gapSize = math.floor(baseGapSize * scaleFactor)
 
     local style = DEFAULT_STYLE
 
     if config then
         gridRows = config.grid and config.grid.rows or gridRows
         gridCols = config.grid and config.grid.cols or gridCols
-        nodeSize = config.grid and config.grid.nodeSize or nodeSize
-        gapSize = config.grid and config.grid.gap or gapSize
+        if config.grid and config.grid.nodeSize then
+            nodeSize = math.floor(config.grid.nodeSize * scaleFactor)
+        end
+        if config.grid and config.grid.gap then
+            gapSize = math.floor(config.grid.gap * scaleFactor)
+        end
         if config.path and #config.path > 0 then
             levelPositions = config.path
         end
@@ -597,14 +571,36 @@ function LevelSelectScene.Enter(params)
         end
     end
 
-    -- 获取第一关名字作为标题
+    -- 裁剪路径只保留可见关卡数量
+    if #levelPositions > MAX_VISIBLE_LEVELS then
+        local trimmed = {}
+        for i = 1, MAX_VISIBLE_LEVELS do
+            trimmed[i] = levelPositions[i]
+        end
+        levelPositions = trimmed
+        -- 自动缩减网格列数
+        local maxCol = 1
+        for _, pos in ipairs(levelPositions) do
+            if pos.col > maxCol then maxCol = pos.col end
+        end
+        gridCols = maxCol
+    end
+
+    -- 根据实际列数检查是否超出屏幕，若超出则缩小
+    local totalGridWidth = gridCols * nodeSize + (gridCols - 1) * gapSize
+    if totalGridWidth > maxGridWidth and maxGridWidth > 0 then
+        local shrink = maxGridWidth / totalGridWidth
+        nodeSize = math.floor(nodeSize * shrink)
+        gapSize = math.floor(gapSize * shrink)
+    end
+
+    -- 获取第一关信息
     local firstLevel = LevelData.GetLevel(1)
-    local levelName = firstLevel and firstLevel.name or "未知"
 
     -- 预计算连接
     local hConn, vConn = ComputeConnections(levelPositions, gridRows)
 
-    -- === 顶部黑色条 ===
+    -- === 顶部条（像素风） ===
     local topBar = UI.Panel {
         width = "100%",
         height = 44,
@@ -613,19 +609,33 @@ function LevelSelectScene.Enter(params)
         alignItems = "center",
         paddingLeft = 20,
         paddingRight = 20,
-        backgroundColor = { 0, 0, 0, 255 },
+        backgroundColor = PF.surface,
+        borderBottomWidth = 2,
+        borderColor = PF.border,
         children = {
             UI.Label {
                 text = "LEVEL 1",
                 fontSize = 16,
                 fontWeight = "bold",
-                fontColor = { 255, 255, 255, 255 },
+                fontColor = PF.primary,
             },
-            UI.Label {
-                text = string.upper(levelName),
-                fontSize = 16,
-                fontWeight = "bold",
-                fontColor = { 255, 255, 255, 255 },
+            -- 中间：金币数
+            UI.Panel {
+                flexDirection = "row",
+                alignItems = "center",
+                gap = 6,
+                children = {
+                    UI.Label {
+                        text = "🪙",
+                        fontSize = 16,
+                    },
+                    UI.Label {
+                        text = "0",
+                        fontSize = 16,
+                        fontWeight = "bold",
+                        fontColor = PF.gold,
+                    },
+                }
             },
             UI.Panel {
                 flexDirection = "row",
@@ -639,31 +649,60 @@ function LevelSelectScene.Enter(params)
                     UI.Label {
                         text = "0/" .. tostring(levelCount * 3),
                         fontSize = 16,
-                        fontColor = { 255, 255, 255, 255 },
+                        fontColor = PF.gold,
                     },
                 }
             },
         }
     }
 
-    -- === 底部黑色条 ===
+    -- === 底部条（像素风） ===
     local bottomBar = UI.Panel {
         width = "100%",
-        height = 44,
+        paddingTop = 8,
+        paddingBottom = 12,
         flexDirection = "row",
         justifyContent = "center",
         alignItems = "center",
-        backgroundColor = { 0, 0, 0, 255 },
+        backgroundColor = PF.surface,
+        borderTopWidth = 2,
+        borderColor = PF.border,
         children = {
-            UI.Button {
-                text = "← 返回",
-                variant = "ghost",
-                height = 32,
-                onClick = function(self)
-                    SceneManager.SwitchTo(SceneManager.SCENE_TITLE)
-                end,
-                fontColor = { 255, 255, 255, 255 },
-            },
+            (function()
+                local proxy = { scale = 1.0 }
+                return UI.Button {
+                    text = "< 返回",
+                    size = "xl",
+                    width = 150,
+                    height = 100,
+                    backgroundImage = WOODEN_BTN.image,
+                    backgroundFit = WOODEN_BTN.fit,
+                    backgroundSlice = WOODEN_BTN.slice,
+                    backgroundColor = WOODEN_BTN.bgColor,
+                    boxShadow = WOODEN_BTN.shadow,
+                    fontColor = WOODEN_BTN.textColor,
+                    fontWeight = WOODEN_BTN.fontWeight,
+                    fontSize = 12,
+                    borderWidth = 0,
+                    scale = 1.0,
+                    onPointerEnter = function(ev, self)
+                        AnimateScale(self, proxy, 1.08, "outBack", 0.2)
+                    end,
+                    onPointerLeave = function(ev, self)
+                        AnimateScale(self, proxy, 1.0, "outQuad", 0.2)
+                    end,
+                    onPointerDown = function(ev, self)
+                        AnimateScale(self, proxy, 0.95, "outQuart", 0.1)
+                    end,
+                    onPointerUp = function(ev, self)
+                        AnimateScale(self, proxy, 1.08, "outBack", 0.15)
+                    end,
+                    onClick = function(self)
+                        PlayUIClick()
+                        SceneManager.SwitchTo(SceneManager.SCENE_TITLE)
+                    end,
+                }
+            end)(),
         }
     }
 
@@ -733,7 +772,7 @@ function LevelSelectScene.Enter(params)
         width = "100%",
         justifyContent = "center",
         alignItems = "center",
-        backgroundColor = { 30, 35, 50, 255 },
+        backgroundColor = PF.bg,
         gap = 0,
         children = gridRowWidgets,
     }
@@ -742,7 +781,7 @@ function LevelSelectScene.Enter(params)
     local root = UI.Panel {
         width = "100%",
         height = "100%",
-        backgroundColor = { 0, 0, 0, 255 },
+        backgroundColor = PF.bg,
         children = {
             topBar,
             gridArea,
@@ -759,6 +798,7 @@ end
 function LevelSelectScene_HandleUpdate(eventType, eventData)
     local dt = eventData["TimeStep"]:GetFloat()
     UpdateTweens(dt)
+    BGM.Tick()
 end
 
 function LevelSelectScene.Exit()
@@ -781,24 +821,25 @@ function SettingsScene.Enter(params)
         height = "100%",
         justifyContent = "center",
         alignItems = "center",
-        backgroundColor = { 25, 28, 42, 255 },
+        backgroundColor = PF.bg,
         children = {
             UI.Panel {
                 width = "90%",
                 maxWidth = 400,
-                padding = 32,
-                gap = 16,
+                padding = 24,
+                gap = 14,
                 alignItems = "center",
-                backgroundColor = { 35, 40, 58, 240 },
-                borderRadius = 16,
-                borderWidth = 2,
-                borderColor = { 80, 140, 255, 80 },
+                backgroundColor = PF.surface,
+                borderRadius = 0,
+                borderWidth = 3,
+                borderColor = PF.border,
                 children = {
                     UI.Label {
                         text = "设置",
-                        fontSize = 28,
-                        fontColor = { 255, 255, 255, 255 },
-                        marginBottom = 8,
+                        fontSize = 24,
+                        fontWeight = "bold",
+                        fontColor = PF.primary,
+                        marginBottom = 6,
                     },
                     -- 音乐音量
                     UI.Panel {
@@ -807,8 +848,8 @@ function SettingsScene.Enter(params)
                         children = {
                             UI.Label {
                                 text = "音乐音量",
-                                fontSize = 14,
-                                fontColor = { 180, 190, 210, 220 },
+                                fontSize = 12,
+                                fontColor = PF.textSec,
                             },
                             UI.Slider {
                                 value = Config.Settings.MusicVolume * 100,
@@ -816,7 +857,7 @@ function SettingsScene.Enter(params)
                                 max = 100,
                                 width = "100%",
                                 onChange = function(self, val)
-                                    Config.Settings.MusicVolume = val / 100
+                                    BGM.SetVolume(val / 100)
                                 end,
                             },
                         }
@@ -828,8 +869,8 @@ function SettingsScene.Enter(params)
                         children = {
                             UI.Label {
                                 text = "音效音量",
-                                fontSize = 14,
-                                fontColor = { 180, 190, 210, 220 },
+                                fontSize = 12,
+                                fontColor = PF.textSec,
                             },
                             UI.Slider {
                                 value = Config.Settings.SFXVolume * 100,
@@ -843,12 +884,14 @@ function SettingsScene.Enter(params)
                         }
                     },
                     -- 游戏说明
-                    UI.Panel { height = 8 },
+                    UI.Panel { height = 6 },
                     UI.Panel {
                         width = "100%",
                         padding = 12,
-                        backgroundColor = { 20, 24, 36, 200 },
-                        borderRadius = 8,
+                        backgroundColor = PF.bg,
+                        borderRadius = 0,
+                        borderWidth = 2,
+                        borderColor = PF.border,
                         children = {
                             UI.Label {
                                 text = "玩法说明:\n" ..
@@ -857,19 +900,28 @@ function SettingsScene.Enter(params)
                                     "· 克隆体会复刻你的全部操作\n" ..
                                     "· 所有角色到达终点即通关\n" ..
                                     "· 任何角色掉落或碰尖刺即失败",
-                                fontSize = 12,
-                                fontColor = { 160, 170, 190, 200 },
+                                fontSize = 10,
+                                fontColor = PF.textSec,
                             },
                         }
                     },
                     -- 返回按钮
-                    UI.Panel { height = 12 },
+                    UI.Panel { height = 10 },
                     UI.Button {
                         text = "返回",
-                        variant = "primary",
                         width = 150,
-                        height = 44,
+                        height = 72,
+                        backgroundImage = WOODEN_BTN.image,
+                        backgroundFit = WOODEN_BTN.fit,
+                        backgroundSlice = WOODEN_BTN.slice,
+                        backgroundColor = WOODEN_BTN.bgColor,
+                        boxShadow = WOODEN_BTN.shadow,
+                        fontColor = WOODEN_BTN.textColor,
+                        fontWeight = WOODEN_BTN.fontWeight,
+                        fontSize = 12,
+                        borderWidth = 0,
                         onClick = function(self)
+                            PlayUIClick()
                             SceneManager.SwitchTo(SceneManager.SCENE_TITLE)
                         end,
                     },

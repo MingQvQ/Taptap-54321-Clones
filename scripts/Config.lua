@@ -6,14 +6,14 @@
 local Config = {}
 
 -- 游戏基本信息
-Config.Title = "影子伙伴"
+Config.Title = "克隆小猪"
 Config.Version = "1.0.0"
 
 -- 物理常量
 Config.Gravity = 20.0              -- 重力加速度
-Config.PlayerSpeed = 5.5           -- 玩家水平移动速度
-Config.PlayerJumpSpeed = 11.0      -- 玩家跳跃初速度
-Config.PlayerRadius = 0.4          -- 玩家碰撞半径（物理单位）
+Config.PlayerSpeed = 4.0           -- 玩家水平移动速度（4格/秒）
+Config.PlayerJumpSpeed = 7.48      -- 玩家跳跃初速度（最大高度≈1.4格）
+Config.PlayerRadius = 0.6          -- 玩家碰撞半径（物理单位）
 
 -- 可变重力系数（上升/下降不同手感）
 Config.GravityScaleRising = 1.0    -- 上升阶段重力系数（轻盈）
@@ -62,8 +62,8 @@ Config.CloneColors = {
 
 -- 音量设置（0.0 ~ 1.0）
 Config.Settings = {
-    MusicVolume = 0.7,
-    SFXVolume = 0.8,
+    MusicVolume = 0.4,
+    SFXVolume = 0.4,
 }
 
 return Config

@@ -14,9 +14,9 @@ local IMG_FLAGS = 2 + 32  -- NVG_IMAGE_REPEATX(2) + NVG_IMAGE_NEAREST(32)
 -- yAnchor: 垂直锚点（0.0=图片顶部对齐屏幕顶，1.0=图片底部对齐屏幕底）
 local DEFAULT_LAYERS = {
     { name = "sky",          file = "image/tilemap/background/sky.png",          scrollSpeed = 0,  yAnchor = 0.0, fill = true },
-    { name = "clouds_small", file = "image/tilemap/background/clouds_small.png", scrollSpeed = 6,  yAnchor = 0.0, yOffsetRatio = -0.12 },
-    { name = "clouds_tiny",  file = "image/tilemap/background/clouds_tiny.png",  scrollSpeed = 8,  yAnchor = 0.0, yOffsetRatio = -0.08 },
-    { name = "clouds_big",   file = "image/tilemap/background/clouds_big.png",   scrollSpeed = 12, yAnchor = 0.0, yOffsetRatio = -0.15 },
+    { name = "clouds_small", file = "image/tilemap/background/clouds_small.png", scrollSpeed = 3,  yAnchor = 0.0, yOffsetRatio = -0.12 },
+    { name = "clouds_tiny",  file = "image/tilemap/background/clouds_tiny.png",  scrollSpeed = 4,  yAnchor = 0.0, yOffsetRatio = -0.08 },
+    { name = "clouds_big",   file = "image/tilemap/background/clouds_big.png",   scrollSpeed = 6,  yAnchor = 0.0, yOffsetRatio = -0.15 },
     { name = "desert",       file = "image/tilemap/background/desert.png",       scrollSpeed = 0,  yAnchor = 0.92, scaleMul = 1.20 },
     { name = "beach",        file = "image/tilemap/background/beach.png",        scrollSpeed = 0,  yAnchor = 0.92, scaleMul = 1.20 },
 }
@@ -74,7 +74,8 @@ end
 --- 渲染所有层
 ---@param screenW number 屏幕宽度（逻辑像素）
 ---@param screenH number 屏幕高度（逻辑像素）
-function ParallaxBackground:Draw(screenW, screenH)
+---@param groundRatio number|nil 地面在屏幕中的垂直比例(0=顶部,1=底部)，用于自适应海岸线位置
+function ParallaxBackground:Draw(screenW, screenH, groundRatio)
     local nvg = self.nvg
 
     -- 计算统一缩放
@@ -106,9 +107,17 @@ function ParallaxBackground:Draw(screenW, screenH)
         local tileH = layer.imgH * layerScale
 
         -- 垂直定位：yAnchor=0 顶部对齐，yAnchor=1 底部对齐
+        -- 如果提供了 groundRatio 且该层的 yAnchor > 0.5（属于地面附近的层），
+        -- 则动态调整使其对齐到地面位置
+        local anchor = layer.yAnchor
+        if groundRatio and anchor > 0.5 then
+            -- 将海岸线/沙滩定位到地面比例位置
+            anchor = groundRatio
+        end
+
         -- yOffsetRatio: 相对屏幕高度的偏移（-0.1 = 上移10%屏幕高度）
         -- yOffset: 固定像素偏移（兼容旧配置）
-        local drawY = (screenH - tileH) * layer.yAnchor + layer.yOffset + layer.yOffsetRatio * screenH
+        local drawY = (screenH - tileH) * anchor + layer.yOffset + layer.yOffsetRatio * screenH
 
         -- 水平滚动偏移
         local ox = 0

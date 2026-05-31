@@ -175,9 +175,13 @@ function EditorTestBridge.ConvertToLevelData()
         name = "编辑器测试",
         camera = { x = 0, y = 0 },
         spawn = { x = 0, y = 0 },
-        goal = { x = 0, y = 0, width = 1.0, height = 1.5 },
+        goals = {},           -- 多终点数组 { x, y, width, height, acceptCount }
+        goalTarget = 0,       -- 关卡目标 = 所有终点 acceptCount 之和
         platforms = {},
         spikes = {},
+        coins = {},           -- 金币数组 { x, y }
+        seagulls = {},        -- 海鸥飞行敌人 { x, y, range, speed }
+        decorations = {},     -- 装饰预制体 { x, y, image }
         playerCount = Config.CloneCount,
     }
 
@@ -187,13 +191,18 @@ function EditorTestBridge.ConvertToLevelData()
     -- 遍历所有图层
     for i, layer in ipairs(TilemapData.layers) do
         if layer.type == "tile" then
-            -- 瓦片层 → 提取平台（合并矩形用于物理碰撞）
-            local layerPlatforms = ExtractPlatformsFromLayer(layer)
-            for _, p in ipairs(layerPlatforms) do
-                table.insert(levelData.platforms, p)
+            -- 地形层 → 提取平台（合并矩形用于物理碰撞）
+            -- 环境层 → 仅渲染，不生成碰撞体
+            local isEnvironment = (layer.layerKind == TilemapData.LAYER_KIND_ENVIRONMENT)
+
+            if not isEnvironment then
+                local layerPlatforms = ExtractPlatformsFromLayer(layer)
+                for _, p in ipairs(layerPlatforms) do
+                    table.insert(levelData.platforms, p)
+                end
             end
 
-            -- 同时提取逐格瓦片数据（用于纹理渲染）
+            -- 所有瓦片层都提取逐格数据（用于纹理渲染）
             for row = 1, gridH do
                 for col = 1, gridW do
                     local v = layer.data[row][col]
@@ -206,6 +215,7 @@ function EditorTestBridge.ConvertToLevelData()
                             size = CELL_SIZE,
                             image = tileInfo.image,  -- 纹理路径（可能为 nil）
                             color = tileInfo.color,  -- 后备颜色
+                            zOrder = layer.zOrder,   -- 渲染层级
                         })
                     end
                 end
@@ -226,16 +236,39 @@ function EditorTestBridge.ConvertToLevelData()
                             levelData.playerCount = info.playerCount or Config.CloneCount
 
                         elseif info.tag == "goal" then
-                            levelData.goal = {
+                            local acceptCount = info.acceptCount or 1
+                            table.insert(levelData.goals, {
                                 x = px, y = py,
                                 width = CELL_SIZE * 0.8,
                                 height = CELL_SIZE * 1.2,
-                            }
+                                acceptCount = acceptCount,
+                            })
+                            levelData.goalTarget = levelData.goalTarget + acceptCount
 
                         elseif info.tag == "spike" then
+                            local rot = TilemapData.GetRotation(i, row, col)
                             table.insert(levelData.spikes, {
                                 x = px, y = py,
                                 width = CELL_SIZE * 0.8,
+                                rotation = rot,  -- 0/90/180/270 度
+                            })
+
+                        elseif info.tag == "coin" then
+                            table.insert(levelData.coins, {
+                                x = px, y = py,
+                            })
+
+                        elseif info.tag == "seagull" then
+                            table.insert(levelData.seagulls, {
+                                x = px, y = py,
+                                range = info.range or 3.0,
+                                speed = info.speed or 2.0,
+                            })
+
+                        elseif info.tag == "decoration" then
+                            table.insert(levelData.decorations, {
+                                x = px, y = py,
+                                image = info.image,
                             })
                         end
                     end

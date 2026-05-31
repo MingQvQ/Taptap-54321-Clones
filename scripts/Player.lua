@@ -55,22 +55,23 @@ function Player.Create(scene, spawnX, spawnY, colorIndex, isPlayer)
     self.body.angularDamping = 0.0
     self.body.gravityScale = Config.GravityScaleFalling  -- 初始下落状态
 
-    -- 主碰撞体
-    local bodyShape = self.node:CreateComponent("CollisionCircle2D")
-    bodyShape.radius = Config.PlayerRadius
+    -- 主碰撞体（矩形，防止蹭边缘卡上去）
+    local bodyShape = self.node:CreateComponent("CollisionBox2D")
+    bodyShape:SetSize(Config.PlayerRadius * 1.6, Config.PlayerRadius * 2.0)
+    bodyShape:SetCenter(0, 0)
     bodyShape.density = 1.0
     bodyShape.friction = 0.0
     bodyShape.restitution = 0.0
     bodyShape.categoryBits = 2
     bodyShape.maskBits = 0xFFFF
 
-    -- 脚底传感器
+    -- 脚底传感器（检测平台 category=1 和其他角色 category=2）
     local footSensor = self.node:CreateComponent("CollisionCircle2D")
     footSensor.radius = Config.PlayerRadius * 0.6
     footSensor.center = Vector2(0, -Config.PlayerRadius * 0.9)
     footSensor.trigger = true
     footSensor.categoryBits = 4
-    footSensor.maskBits = 1
+    footSensor.maskBits = 3  -- 1(平台) | 2(角色) = 3
 
     -- 地面检测
     self.onGround = false
@@ -109,7 +110,9 @@ end
 function Player:OnContactBegin(otherNode)
     if not self.isAlive then return end
     local name = otherNode.name
-    if name == "Platform" or name == "Ground" then
+    -- 平台、地面、其他角色（猪踩猪）都算有效地面
+    if name == "Platform" or name == "Ground"
+        or name == "Player" or string.find(name, "Clone_", 1, true) then
         self.groundContactCount = self.groundContactCount + 1
         self.onGround = true
     end
@@ -118,7 +121,8 @@ end
 function Player:OnContactEnd(otherNode)
     if not self.isAlive then return end
     local name = otherNode.name
-    if name == "Platform" or name == "Ground" then
+    if name == "Platform" or name == "Ground"
+        or name == "Player" or string.find(name, "Clone_", 1, true) then
         self.groundContactCount = self.groundContactCount - 1
         if self.groundContactCount <= 0 then
             self.groundContactCount = 0
@@ -343,12 +347,15 @@ function Player:GetPosition()
     return Vector2(0, 0)
 end
 
---- 杀死角色
+--- 杀死角色（死亡后失去控制、禁用碰撞）
 function Player:Kill()
+    if not self.isAlive then return end
     self.isAlive = false
+    self.deathTime = 0  -- 死亡动画计时器
     if self.body then
         self.body.linearVelocity = Vector2(0, 0)
         self.body.gravityScale = 0
+        self.body.enabled = false  -- 禁用物理碰撞
     end
 end
 

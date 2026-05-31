@@ -160,7 +160,22 @@ function CloneSystem:GetAllAliveCharacters()
     return result
 end
 
---- 检查是否全部到达终点
+--- 统计已到达终点的角色数量
+---@return number
+function CloneSystem:CountReachedGoal()
+    local count = 0
+    if self.mainPlayer and self.mainPlayer.reachedGoal then
+        count = count + 1
+    end
+    for _, clone in ipairs(self.clones) do
+        if clone.reachedGoal then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+--- 检查是否全部到达终点（旧接口，兼容保留）
 function CloneSystem:AllReachedGoal()
     -- 玩家还没生成，不算通关
     if not self.mainPlayer then return false end
@@ -190,6 +205,25 @@ function CloneSystem:AnyDead()
         end
     end
     return false
+end
+
+--- 获取仍可能到达终点的角色数（已到达 + 存活 + 未生成）
+function CloneSystem:CountPotentialSuccess()
+    local count = 0
+    -- 已到达终点的
+    count = count + self:CountReachedGoal()
+    -- 存活但还没到终点的
+    if self.mainPlayer and self.mainPlayer.isAlive and not self.mainPlayer.reachedGoal then
+        count = count + 1
+    end
+    for _, clone in ipairs(self.clones) do
+        if clone.isAlive and not clone.reachedGoal then
+            count = count + 1
+        end
+    end
+    -- 还没生成的
+    count = count + self.currentNumber
+    return count
 end
 
 --- 销毁所有角色

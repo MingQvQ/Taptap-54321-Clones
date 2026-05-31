@@ -67,6 +67,9 @@ local brushMatrixCols_ = 0
 local arrangeMode_ = false
 local arrangeSourceIndex_ = nil  -- { setIdx, localIdx } 或 nil
 
+--- 当前预制体放置旋转角度（0/90/180/270）
+local currentRotation_ = 0
+
 -- UI 引用
 local selectedLabel_ = nil
 local sizeLabel_ = nil
@@ -83,7 +86,20 @@ local loadListPanel_ = nil
 local saveNameField_ = nil
 local assetPickerOverlay_ = nil
 local assetListPanel_ = nil
+local deleteOverlay_ = nil
+local deleteListPanel_ = nil
 local arrangeModeBtn_ = nil
+
+--- 判断是否有任何弹窗/遮罩处于可见状态（用于阻断底层射线/点击）
+local function IsAnyOverlayVisible()
+    if confirmOverlay_ and confirmOverlay_:IsVisible() then return true end
+    if saveOverlay_ and saveOverlay_:IsVisible() then return true end
+    if loadOverlay_ and loadOverlay_:IsVisible() then return true end
+    if assetPickerOverlay_ and assetPickerOverlay_:IsVisible() then return true end
+    if deleteOverlay_ and deleteOverlay_:IsVisible() then return true end
+    if exitConfirmOverlay_ and exitConfirmOverlay_:IsVisible() then return true end
+    return false
+end
 
 -- UI 边距（左侧面板加宽以容纳网格）
 local UI_MARGINS = { top = 48, bottom = 52, left = 220, right = 140 }
@@ -103,7 +119,18 @@ local PROTECTED_PREFAB_IDS = { [1] = true, [2] = true }
 local TILESET_DISPLAY_NAMES = {
     tilemap_tiles = "通用瓦片",
     softy_sand = "沙地",
+    basic = "基础色块",
 }
+
+--- 每组瓦片在面板中显示的列数（默认 PALETTE_COLS）
+local TILESET_COLS = {
+    tilemap_tiles = 4,
+    softy_sand = 4,
+    basic = 4,
+}
+
+--- 瓦片集排列顺序（basic 放最后）
+local TILESET_ORDER = { "softy_sand", "tilemap_tiles", "basic" }
 
 --- 从 tileRegistry 的 group 字段构建瓦片集分组
 local function AutoLoadTileAssets()
@@ -125,8 +152,23 @@ local function AutoLoadTileAssets()
         end
     end
 
+    -- 按 TILESET_ORDER 排列（basic 放最后），未在 ORDER 里的组追加到末尾
+    local orderedGroups = {}
+    local ordered = {}
+    for _, g in ipairs(TILESET_ORDER) do
+        if groupMap[g] then
+            table.insert(orderedGroups, g)
+            ordered[g] = true
+        end
+    end
+    for _, g in ipairs(groupOrder) do
+        if not ordered[g] then
+            table.insert(orderedGroups, g)
+        end
+    end
+
     -- 构建瓦片集列表
-    for _, folder in ipairs(groupOrder) do
+    for _, folder in ipairs(orderedGroups) do
         local displayName = TILESET_DISPLAY_NAMES[folder] or folder
         table.insert(paletteTileSets_, {
             name = displayName,
@@ -412,6 +454,136 @@ local function HideLoadDialog()
     uiCooldownTimer_ = UI_COOLDOWN_DURATION
 end
 
+-- 弹框：删除关卡文件
+local RebuildDeleteList
+local function ShowDeleteDialog()
+    if deleteOverlay_ then
+        RebuildDeleteList()
+        deleteOverlay_:SetVisible(true)
+    end
+end
+local function HideDeleteDialog()
+    if deleteOverlay_ then deleteOverlay_:SetVisible(false) end
+    uiCooldownTimer_ = UI_COOLDOWN_DURATION
+end
+
+--- 获取文件大小（不存在或无法打开返回 0）
+local function GetLocalFileSize(path)
+    if not fileSystem:FileExists(path) then return 0 end
+    local f = File(path, FILE_READ)
+    if not f:IsOpen() then return 0 end
+    local sz = f:GetSize()
+    f:Close()
+    return sz
+end
+
+--- 删除指定关卡文件（本地 + 云端 + 索引）
+local function DeleteLevelFile(filename)
+    -- 1. 删除本地文件
+    local path = SAVE_DIR .. "/" .. filename .. ".json"
+    if fileSystem:FileExists(path) then
+        -- 尝试直接删除，沙箱可能不支持则写空文件标记
+        local ok = pcall(function() fileSystem:Delete(path) end)
+        if not ok then
+            local f = File(path, FILE_WRITE)
+            if f:IsOpen() then
+                f:WriteString("")
+                f:Close()
+            end
+        end
+        print("[LevelEditor] Deleted local: " .. path)
+    end
+
+    -- 2. 删除云端数据（设为 nil 清除）
+    local cloudKey = CLOUD_PREFIX .. filename
+    clientCloud:Set(cloudKey, nil, {
+        ok = function()
+            print("[LevelEditor] Deleted cloud: " .. cloudKey)
+        end,
+        error = function(code, reason)
+            print("[LevelEditor] Cloud delete error: " .. tostring(reason))
+        end
+    })
+
+    -- 3. 从索引中移除并更新云端索引
+    for i = #saveIndex_, 1, -1 do
+        if saveIndex_[i] == filename then
+            table.remove(saveIndex_, i)
+            break
+        end
+    end
+    clientCloud:Set(CLOUD_INDEX_KEY, saveIndex_, {
+        ok = function() end,
+        error = function() end
+    })
+
+    -- 刷新列表
+    RebuildDeleteList()
+end
+
+RebuildDeleteList = function()
+    if not deleteListPanel_ then return end
+    deleteListPanel_:ClearChildren()
+
+    -- 合并云端索引和本地文件列表（去重）
+    local allNames = {}
+    local nameSet = {}
+
+    for _, name in ipairs(saveIndex_) do
+        if not nameSet[name] then
+            nameSet[name] = true
+            table.insert(allNames, name)
+        end
+    end
+
+    fileSystem:CreateDir(SAVE_DIR)
+    local files = fileSystem:ScanDir(SAVE_DIR .. "/", "*.json", SCAN_FILES, false)
+    for _, fname in ipairs(files) do
+        local baseName = fname:gsub("%.json$", "")
+        -- 跳过被清空标记的文件（0字节）
+        local fpath = SAVE_DIR .. "/" .. fname
+        if not nameSet[baseName] and GetLocalFileSize(fpath) > 0 then
+            nameSet[baseName] = true
+            table.insert(allNames, baseName)
+        end
+    end
+
+    if #allNames == 0 then
+        deleteListPanel_:AddChild(UI.Label {
+            text = "暂无存档文件",
+            fontSize = 12, fontColor = { 150, 160, 180, 180 },
+        })
+        return
+    end
+
+    for _, name in ipairs(allNames) do
+        local filename = name
+        deleteListPanel_:AddChild(UI.Panel {
+            width = "100%", height = 36,
+            flexDirection = "row",
+            alignItems = "center",
+            justifyContent = "space-between",
+            paddingLeft = 12, paddingRight = 8,
+            backgroundColor = { 40, 44, 60, 180 },
+            borderRadius = 6,
+            onClick = function(self) end,  -- 阻止穿透
+            children = {
+                UI.Label {
+                    text = "📄 " .. filename .. ".json",
+                    fontSize = 12, fontColor = { 255, 255, 255, 230 },
+                    flexShrink = 1,
+                },
+                UI.Button {
+                    text = "🗑", variant = "danger", width = 32, height = 28,
+                    onClick = function(self)
+                        DeleteLevelFile(filename)
+                    end,
+                },
+            },
+        })
+    end
+end
+
 RebuildLoadList = function()
     if not loadListPanel_ then return end
     loadListPanel_:ClearChildren()
@@ -433,7 +605,9 @@ RebuildLoadList = function()
     local files = fileSystem:ScanDir(SAVE_DIR .. "/", "*.json", SCAN_FILES, false)
     for _, fname in ipairs(files) do
         local baseName = fname:gsub("%.json$", "")
-        if not nameSet[baseName] then
+        -- 跳过被清空标记的文件（0字节）
+        local fpath = SAVE_DIR .. "/" .. fname
+        if not nameSet[baseName] and GetLocalFileSize(fpath) > 0 then
             nameSet[baseName] = true
             table.insert(allNames, baseName)
         end
@@ -591,12 +765,12 @@ end
 
 -- 预设网格尺寸配置（对应相机 orthoSize 自适应）
 local GRID_PRESETS = {
-    { label = "24×13", w = 24, h = 13, desc = "标准(推荐)" },
-    { label = "20×11", w = 20, h = 11, desc = "宽屏" },
-    { label = "16×9",  w = 16, h = 9,  desc = "紧凑" },
-    { label = "12×7",  w = 12, h = 7,  desc = "迷你" },
+    { label = "30×13", w = 30, h = 13, desc = "宽屏扩展(推荐)" },
+    { label = "24×13", w = 24, h = 13, desc = "标准16:9" },
+    { label = "20×11", w = 20, h = 11, desc = "紧凑" },
+    { label = "16×9",  w = 16, h = 9,  desc = "迷你" },
 }
-local currentPresetIndex_ = 1  -- 默认 24×13
+local currentPresetIndex_ = 1  -- 默认 30×13
 
 function LevelEditorUI.Enter(params)
     local fromTest = params and params.fromTest
@@ -666,6 +840,8 @@ function LevelEditorUI.Exit()
     loadOverlay_ = nil
     loadListPanel_ = nil
     saveNameField_ = nil
+    deleteOverlay_ = nil
+    deleteListPanel_ = nil
     assetPickerOverlay_ = nil
     assetListPanel_ = nil
 end
@@ -682,7 +858,8 @@ RebuildPalette = function()
     if currentTab_ == "tile" then
         -- 瓦片网格调色板（按瓦片集分组）
         RefreshPaletteTileIds()
-        local CELL_SIZE = 22  -- 每个格子的像素大小
+        local CELL_SIZE_DEFAULT = 22  -- 默认格子像素大小（>4列时）
+        local CELL_SIZE_LARGE = 46   -- 4列及以下布局时使用更大格子
 
         -- 提示文字
         local hintText = arrangeMode_ and "整理模式：点击两个瓦片交换位置" or "点击选择瓦片"
@@ -729,12 +906,14 @@ RebuildPalette = function()
             -- 如果未折叠，显示该组的瓦片网格
             if not isCollapsed then
                 local setTileIds = tileSet.tileIds
-                local setRows = math.ceil(#setTileIds / PALETTE_COLS)
+                local groupCols = TILESET_COLS[setFolder] or PALETTE_COLS
+                local cellSize = (groupCols <= 4) and CELL_SIZE_LARGE or CELL_SIZE_DEFAULT
+                local setRows = math.ceil(#setTileIds / groupCols)
 
                 for row = 1, setRows do
                     local rowChildren = {}
-                    for col = 1, PALETTE_COLS do
-                        local localIndex = (row - 1) * PALETTE_COLS + col
+                    for col = 1, groupCols do
+                        local localIndex = (row - 1) * groupCols + col
                         local tileId = setTileIds[localIndex] or 0
 
                         if tileId > 0 then
@@ -747,8 +926,8 @@ RebuildPalette = function()
                                 bgProps.backgroundColor = info and { info.color[1], info.color[2], info.color[3], 220 } or { 80, 80, 80, 200 }
                             end
 
-                            bgProps.width = CELL_SIZE
-                            bgProps.height = CELL_SIZE
+                            bgProps.width = cellSize
+                            bgProps.height = cellSize
                             bgProps.borderRadius = 2
 
                             -- 高亮逻辑：当前选中
@@ -806,9 +985,9 @@ RebuildPalette = function()
 
                             table.insert(rowChildren, UI.Panel(bgProps))
                         else
-                            -- 空格占位
+                            -- 空格占位（不可选）
                             table.insert(rowChildren, UI.Panel {
-                                width = CELL_SIZE, height = CELL_SIZE,
+                                width = cellSize, height = cellSize,
                                 backgroundColor = { 25, 28, 40, 100 },
                                 borderRadius = 2,
                             })
@@ -817,7 +996,7 @@ RebuildPalette = function()
 
                     table.insert(children, UI.Panel {
                         flexDirection = "row",
-                        gap = 1,
+                        gap = 2,
                         children = rowChildren,
                     })
                 end
@@ -868,8 +1047,8 @@ RebuildPalette = function()
                         else
                             bgProps.backgroundColor = info and { info.color[1], info.color[2], info.color[3], 220 } or { 80, 80, 80, 200 }
                         end
-                        bgProps.width = CELL_SIZE
-                        bgProps.height = CELL_SIZE
+                        bgProps.width = CELL_SIZE_DEFAULT
+                        bgProps.height = CELL_SIZE_DEFAULT
                         bgProps.borderRadius = 2
                         local isSelected = (currentBrushId_ == tileId and currentTool_ == "paint" and not arrangeMode_)
                         if isSelected then
@@ -892,7 +1071,7 @@ RebuildPalette = function()
                         table.insert(rowChildren, UI.Panel(bgProps))
                     else
                         table.insert(rowChildren, UI.Panel {
-                            width = CELL_SIZE, height = CELL_SIZE,
+                            width = CELL_SIZE_DEFAULT, height = CELL_SIZE_DEFAULT,
                             backgroundColor = { 25, 28, 40, 100 },
                             borderRadius = 2,
                         })
@@ -917,6 +1096,35 @@ RebuildPalette = function()
                 local isSelected = (currentBrushId_ == prefabId and currentTool_ == "paint")
                 local canDelete = not PROTECTED_PREFAB_IDS[prefabId]
 
+                -- 构建名称标签（含属性值）
+                local displayName = info.name
+                if info.tag == "player_spawn" then
+                    displayName = info.name .. " ×" .. (info.playerCount or 5)
+                elseif info.tag == "goal" then
+                    displayName = info.name .. " ×" .. (info.acceptCount or 1)
+                end
+
+                -- 构建图标面板（有图片时显示图片缩略图，否则显示色块+emoji）
+                local iconPanel
+                if info.image then
+                    iconPanel = UI.Panel {
+                        width = 28, height = 28,
+                        borderRadius = 4,
+                        backgroundImage = info.image,
+                        backgroundFit = "cover",
+                    }
+                else
+                    iconPanel = UI.Panel {
+                        width = 28, height = 28,
+                        backgroundColor = { info.color[1], info.color[2], info.color[3], 180 },
+                        borderRadius = 4,
+                        justifyContent = "center", alignItems = "center",
+                        children = {
+                            UI.Label { text = info.icon, fontSize = 14 },
+                        },
+                    }
+                end
+
                 local rowChildren = {
                     UI.Panel {
                         flex = 1, height = "100%",
@@ -929,22 +1137,55 @@ RebuildPalette = function()
                             RebuildPalette()
                         end,
                         children = {
-                            UI.Panel {
-                                width = 28, height = 28,
-                                backgroundColor = { info.color[1], info.color[2], info.color[3], 180 },
-                                borderRadius = 4,
-                                justifyContent = "center", alignItems = "center",
-                                children = {
-                                    UI.Label { text = info.icon, fontSize = 14 },
-                                },
-                            },
+                            iconPanel,
                             UI.Label {
-                                text = info.name, fontSize = 11,
+                                text = displayName, fontSize = 11,
                                 fontColor = { 255, 255, 255, 220 },
                             },
                         },
                     },
                 }
+
+                -- 出生点/终点：增减属性按钮
+                if info.tag == "player_spawn" or info.tag == "goal" then
+                    table.insert(rowChildren, UI.Panel {
+                        flexDirection = "row", alignItems = "center", gap = 2,
+                        children = {
+                            UI.Panel {
+                                width = 20, height = 20,
+                                justifyContent = "center", alignItems = "center",
+                                backgroundColor = { 60, 70, 100, 200 },
+                                borderRadius = 4,
+                                onClick = function(self)
+                                    if info.tag == "player_spawn" then
+                                        info.playerCount = math.max(1, (info.playerCount or 5) - 1)
+                                    else
+                                        info.acceptCount = math.max(1, (info.acceptCount or 1) - 1)
+                                    end
+                                    dirty_ = true
+                                    RebuildPalette()
+                                end,
+                                children = { UI.Label { text = "−", fontSize = 12, fontColor = { 200, 200, 255, 255 } } },
+                            },
+                            UI.Panel {
+                                width = 20, height = 20,
+                                justifyContent = "center", alignItems = "center",
+                                backgroundColor = { 60, 70, 100, 200 },
+                                borderRadius = 4,
+                                onClick = function(self)
+                                    if info.tag == "player_spawn" then
+                                        info.playerCount = (info.playerCount or 5) + 1
+                                    else
+                                        info.acceptCount = (info.acceptCount or 1) + 1
+                                    end
+                                    dirty_ = true
+                                    RebuildPalette()
+                                end,
+                                children = { UI.Label { text = "+", fontSize = 12, fontColor = { 200, 200, 255, 255 } } },
+                            },
+                        },
+                    })
+                end
 
                 if canDelete then
                     table.insert(rowChildren, UI.Panel {
@@ -1092,9 +1333,9 @@ RebuildLayerList = function()
                             end,
                         },
                         UI.Label {
-                            text = (layer.type == "tile" and "瓦片" or "预制体") .. " z:" .. layer.zOrder,
+                            text = (layer.layerKind == "terrain" and "地形层" or layer.layerKind == "environment" and "环境层" or "预制体层") .. " z:" .. layer.zOrder,
                             fontSize = 8,
-                            fontColor = { 150, 160, 180, 150 },
+                            fontColor = layer.layerKind == "environment" and { 120, 200, 120, 180 } or { 150, 160, 180, 150 },
                         },
                     },
                 },
@@ -1126,20 +1367,47 @@ RebuildLayerList = function()
         table.insert(children, row)
     end
 
-    -- 添加/删除图层
+    -- 添加图层按钮组（环境层/地形层/预制体层）
     if #TilemapData.layers < TilemapData.MAX_LAYERS then
         table.insert(children, UI.Panel {
-            width = "100%", height = 22,
-            justifyContent = "center", alignItems = "center",
-            backgroundColor = { 50, 120, 80, 150 },
-            borderRadius = 4, marginTop = 4,
-            onClick = function(self)
-                local lastType = TilemapData.layers[#TilemapData.layers].type
-                local newType = (lastType == "tile") and "prefab" or "tile"
-                TilemapData.AddLayer(nil, newType)
-                RebuildLayerList()
-            end,
-            children = { UI.Label { text = "+ 图层", fontSize = 10, fontColor = { 255, 255, 255, 220 } } },
+            width = "100%",
+            flexDirection = "row",
+            gap = 3, marginTop = 4,
+            children = {
+                UI.Panel {
+                    flex = 1, height = 20,
+                    justifyContent = "center", alignItems = "center",
+                    backgroundColor = { 50, 140, 80, 180 },
+                    borderRadius = 3,
+                    onClick = function(self)
+                        TilemapData.AddLayer("环境", "tile", nil, TilemapData.LAYER_KIND_ENVIRONMENT)
+                        RebuildLayerList()
+                    end,
+                    children = { UI.Label { text = "+环境", fontSize = 9, fontColor = { 255, 255, 255, 220 } } },
+                },
+                UI.Panel {
+                    flex = 1, height = 20,
+                    justifyContent = "center", alignItems = "center",
+                    backgroundColor = { 50, 100, 160, 180 },
+                    borderRadius = 3,
+                    onClick = function(self)
+                        TilemapData.AddLayer("地形", "tile", nil, TilemapData.LAYER_KIND_TERRAIN)
+                        RebuildLayerList()
+                    end,
+                    children = { UI.Label { text = "+地形", fontSize = 9, fontColor = { 255, 255, 255, 220 } } },
+                },
+                UI.Panel {
+                    flex = 1, height = 20,
+                    justifyContent = "center", alignItems = "center",
+                    backgroundColor = { 140, 100, 50, 180 },
+                    borderRadius = 3,
+                    onClick = function(self)
+                        TilemapData.AddLayer("预制体", "prefab", nil, TilemapData.LAYER_KIND_PREFAB)
+                        RebuildLayerList()
+                    end,
+                    children = { UI.Label { text = "+预制体", fontSize = 9, fontColor = { 255, 255, 255, 220 } } },
+                },
+            },
         })
     end
     if #TilemapData.layers > 1 then
@@ -1406,6 +1674,10 @@ function LevelEditorUI.BuildUI()
                 onClick = function(self) ShowLoadDialog() end,
             },
             UI.Button {
+                text = "🗑 删除", variant = "outline", height = 34,
+                onClick = function(self) ShowDeleteDialog() end,
+            },
+            UI.Button {
                 text = "🧹 清空", variant = "danger", height = 34,
                 onClick = function(self) ShowConfirmDialog() end,
             },
@@ -1609,6 +1881,57 @@ function LevelEditorUI.BuildUI()
         },
     }
 
+    -- === 删除弹框 ===
+    deleteListPanel_ = UI.Panel {
+        width = "100%",
+        gap = 6,
+        paddingLeft = 8, paddingRight = 8,
+        overflow = "scroll",
+        maxHeight = 240,
+        children = {},
+    }
+
+    deleteOverlay_ = UI.Panel {
+        position = "absolute",
+        width = "100%", height = "100%",
+        justifyContent = "center", alignItems = "center",
+        backgroundColor = { 0, 0, 0, 160 },
+        visible = false,
+        onClick = function(self)
+            HideDeleteDialog()
+        end,
+        children = {
+            UI.Panel {
+                width = 340,
+                minHeight = 160, maxHeight = 360,
+                justifyContent = "flex-start", alignItems = "center",
+                gap = 12,
+                paddingTop = 16, paddingBottom = 16,
+                backgroundColor = { 35, 38, 55, 250 },
+                borderRadius = 12,
+                borderWidth = 1,
+                borderColor = { 80, 90, 120, 200 },
+                onClick = function(self) end,  -- 阻止穿透
+                children = {
+                    UI.Label {
+                        text = "删除关卡",
+                        fontSize = 15, fontWeight = "bold",
+                        fontColor = { 255, 255, 255, 240 },
+                    },
+                    UI.Label {
+                        text = "点击 🗑 按钮删除对应文件",
+                        fontSize = 11, fontColor = { 255, 150, 150, 180 },
+                    },
+                    deleteListPanel_,
+                    UI.Button {
+                        text = "关闭", variant = "outline", height = 32,
+                        onClick = function(self) HideDeleteDialog() end,
+                    },
+                },
+            },
+        },
+    }
+
     -- === 素材选择器弹框 ===
     assetListPanel_ = UI.Panel {
         width = "100%",
@@ -1733,6 +2056,7 @@ function LevelEditorUI.BuildUI()
             confirmOverlay_,
             saveOverlay_,
             loadOverlay_,
+            deleteOverlay_,
             assetPickerOverlay_,
             exitConfirmOverlay_,
         },
@@ -1763,10 +2087,19 @@ local function PaintWithBrush(anchorRow, anchorCol)
     else
         -- 单瓦片画笔
         TilemapData.Paint(anchorRow, anchorCol, currentBrushId_)
+        -- 如果是预制体层且当前选的是尖刺，记录旋转
+        local activeLayer = TilemapData.GetActiveLayer()
+        if activeLayer and activeLayer.type == "prefab" and currentRotation_ ~= 0 then
+            local info = TilemapData.GetPrefabInfo(currentBrushId_)
+            if info and info.tag == "spike" then
+                TilemapData.SetRotation(anchorRow, anchorCol, currentRotation_)
+            end
+        end
     end
 end
 
 function LevelEditor_HandleUpdate(eventType, eventData)
+    require("BGM").Tick()
     local screenW = graphics:GetWidth()
     local screenH = graphics:GetHeight()
     local dpr = graphics:GetDPR()
@@ -1853,6 +2186,65 @@ function LevelEditor_HandleRender(eventType, eventData)
         end
     end
 
+    -- 预制体悬停预览（显示将要放置的预制体图标和颜色）
+    if currentTool_ == "paint" and currentTab_ == "prefab" then
+        local info = TilemapData.GetPrefabInfo(currentBrushId_)
+        if info and info.id ~= 0 then
+            local hr = TilemapRenderer.hoverRow
+            local hc = TilemapRenderer.hoverCol
+            if hr >= 1 and hr <= TilemapData.gridHeight and hc >= 1 and hc <= TilemapData.gridWidth then
+                local cellSize = layout_.cellSize
+                local ox = layout_.offsetX
+                local oy = layout_.offsetY
+                local cx = ox + (hc - 1) * cellSize
+                local cy = oy + (hr - 1) * cellSize
+                local centerX = cx + cellSize / 2
+                local centerY = cy + cellSize / 2
+
+                -- 预览：半透明颜色底 + 图标（带旋转）
+                nvgSave(nvg_)
+                nvgTranslate(nvg_, centerX, centerY)
+                if info.tag == "spike" then
+                    nvgRotate(nvg_, math.rad(currentRotation_))
+                end
+
+                -- 半透明背景
+                local c = info.color
+                nvgBeginPath(nvg_)
+                nvgRoundedRect(nvg_, -cellSize * 0.5 + 2, -cellSize * 0.5 + 2, cellSize - 4, cellSize - 4, 4)
+                nvgFillColor(nvg_, nvgRGBA(c[1], c[2], c[3], math.floor(c[4] * 0.35)))
+                nvgFill(nvg_)
+
+                -- 边框
+                nvgBeginPath(nvg_)
+                nvgRoundedRect(nvg_, -cellSize * 0.5 + 2, -cellSize * 0.5 + 2, cellSize - 4, cellSize - 4, 4)
+                nvgStrokeColor(nvg_, nvgRGBA(c[1], c[2], c[3], 160))
+                nvgStrokeWidth(nvg_, 1.5)
+                nvgStroke(nvg_)
+
+                -- 图标
+                if info.icon and info.icon ~= "" then
+                    nvgFontFace(nvg_, "sans")
+                    nvgFontSize(nvg_, cellSize * 0.5)
+                    nvgTextAlign(nvg_, NVG_ALIGN_CENTER + NVG_ALIGN_MIDDLE)
+                    nvgFillColor(nvg_, nvgRGBA(255, 255, 255, 180))
+                    nvgText(nvg_, 0, 0, info.icon)
+                end
+
+                nvgRestore(nvg_)
+            end
+
+            -- 尖刺旋转角度提示（右下角）
+            if info.tag == "spike" then
+                nvgFontFace(nvg_, "sans")
+                nvgFontSize(nvg_, 12)
+                nvgTextAlign(nvg_, NVG_ALIGN_RIGHT + NVG_ALIGN_BOTTOM)
+                nvgFillColor(nvg_, nvgRGBA(220, 50, 50, 220))
+                nvgText(nvg_, logW - 16, logH - 56, "旋转: " .. currentRotation_ .. "° [R]")
+            end
+        end
+    end
+
     -- 错误提示 Toast
     local toastMsg, toastTimer = LevelEditorUI.GetErrorToast()
     if toastTimer > 0 and toastMsg ~= "" then
@@ -1882,6 +2274,9 @@ function LevelEditor_HandleMouseDown(eventType, eventData)
     local dpr = graphics:GetDPR()
     local mouseX = input.mousePosition.x / dpr
     local mouseY = input.mousePosition.y / dpr
+
+    -- 弹窗打开时阻断所有底层点击/射线
+    if IsAnyOverlayVisible() then return end
 
     -- 弹窗冷却期间不响应地图绘制
     if uiCooldownTimer_ > 0 then return end
@@ -1935,6 +2330,10 @@ function LevelEditor_HandleKeyDown(eventType, eventData)
     if key == KEY_Z and input:GetQualifierDown(QUAL_CTRL) then
         TilemapData.Undo()
         dirty_ = true
+    elseif key == KEY_R then
+        -- R 键循环旋转角度（0 → 90 → 180 → 270 → 0）
+        currentRotation_ = (currentRotation_ + 90) % 360
+        print("[LevelEditor] Spike rotation: " .. currentRotation_ .. "°")
     end
 end
 
