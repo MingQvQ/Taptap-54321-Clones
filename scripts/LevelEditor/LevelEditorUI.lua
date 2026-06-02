@@ -23,7 +23,7 @@ local isDrawing_ = false
 
 --- 弹窗关闭后的冷却计时器（防止点击弹窗按钮后误放瓦片）
 local uiCooldownTimer_ = 0
-local UI_COOLDOWN_DURATION = 0.4  -- 冷却时间（秒）
+local UI_COOLDOWN_DURATION = 1.0  -- 冷却时间（秒）
 
 --- 脏标记：追踪是否有未保存的改动
 local dirty_ = false
@@ -88,6 +88,11 @@ local assetPickerOverlay_ = nil
 local assetListPanel_ = nil
 local deleteOverlay_ = nil
 local deleteListPanel_ = nil
+local assetsInfoOverlay_ = nil
+local assetsInfoLabel_ = nil
+
+--- 当前加载/保存的存档名（用于"存档"按钮默认文件名）
+local currentLoadedFile_ = nil
 
 local arrangeModeBtn_ = nil
 
@@ -98,7 +103,7 @@ local function IsAnyOverlayVisible()
     if loadOverlay_ and loadOverlay_:IsVisible() then return true end
     if assetPickerOverlay_ and assetPickerOverlay_:IsVisible() then return true end
     if deleteOverlay_ and deleteOverlay_:IsVisible() then return true end
-
+    if assetsInfoOverlay_ and assetsInfoOverlay_:IsVisible() then return true end
     if exitConfirmOverlay_ and exitConfirmOverlay_:IsVisible() then return true end
     return false
 end
@@ -369,6 +374,7 @@ local function SaveToFile(filename)
     end
 
     dirty_ = false
+    currentLoadedFile_ = filename
     print("[LevelEditor] Saved: " .. filename)
 end
 
@@ -394,6 +400,7 @@ local function LoadFromFile(filename)
                 UpdateSelectedLabel()
                 RebuildLayerList()
                 RebuildPalette()
+                currentLoadedFile_ = filename
                 print("[LevelEditor] Loaded from local: " .. filename)
                 return true
             end
@@ -414,6 +421,7 @@ local function LoadFromFile(filename)
                 UpdateSelectedLabel()
                 RebuildLayerList()
                 RebuildPalette()
+                currentLoadedFile_ = filename
                 print("[LevelEditor] Loaded from cloud: " .. cloudKey)
 
                 -- 缓存到本地 File（后续同会话内快速加载）
@@ -512,6 +520,84 @@ local function ExportLevelToFile()
     print("EXPORT_JSON_START|" .. filename .. "|")
     print(jsonStr)
     print("EXPORT_JSON_END|" .. filename .. "|")
+end
+
+-- === 静态文件相关弹窗逻辑 ===
+
+--- 隐藏静态文件信息弹窗
+local function HideAssetsInfoDialog()
+    if assetsInfoOverlay_ then assetsInfoOverlay_:SetVisible(false) end
+    uiCooldownTimer_ = UI_COOLDOWN_DURATION
+end
+
+--- 保存当前地图为 assets 静态关卡文件（输出到日志供外部提取）
+local function SaveAsStaticLevel()
+    -- 获取关卡数据
+    local valid, errMsg = EditorTestBridge.Validate()
+    if not valid then
+        -- 验证不通过时提示
+        if assetsInfoLabel_ then
+            assetsInfoLabel_:SetText("保存失败: " .. tostring(errMsg))
+        end
+        if assetsInfoOverlay_ then assetsInfoOverlay_:SetVisible(true) end
+        return
+    end
+
+    local levelData = EditorTestBridge.ConvertToLevelData()
+    local jsonStr = cjson.encode(levelData)
+
+    -- 使用当前加载的存档名作为文件名，没有则自动编号
+    local filename
+    if currentLoadedFile_ and currentLoadedFile_ ~= "" then
+        -- 去掉 .json 后缀（如有）
+        local baseName = currentLoadedFile_:gsub("%.json$", "")
+        filename = "Levels/" .. baseName .. ".json"
+    else
+        -- 没有加载过文件，自动编号
+        local num = 1
+        while cache:Exists(string.format("Levels/level%02d.json", num)) do
+            num = num + 1
+        end
+        filename = string.format("Levels/level%02d.json", num)
+    end
+
+    -- 输出到日志（AI 可从 /opt/log/dev/user_script.log 读取后写入 assets/）
+    print("STATIC_LEVEL_SAVE_START|" .. filename .. "|")
+    print(jsonStr)
+    print("STATIC_LEVEL_SAVE_END|" .. filename .. "|")
+
+    -- 显示确认信息
+    if assetsInfoLabel_ then
+        assetsInfoLabel_:SetText("已保存: " .. filename .. "\n(数据已输出到日志)")
+    end
+    if assetsInfoOverlay_ then assetsInfoOverlay_:SetVisible(true) end
+    print("[LevelEditor] Static level saved to log: " .. filename)
+end
+
+--- 查看 assets 中有哪些静态关卡文件
+local function ShowAssetsFileList()
+    local found = {}
+    for i = 1, 99 do
+        local path = string.format("Levels/level%02d.json", i)
+        if cache:Exists(path) then
+            table.insert(found, path)
+        end
+    end
+
+    local msg = ""
+    if #found == 0 then
+        msg = "assets/Levels/ 中没有找到关卡文件"
+    else
+        msg = "共找到 " .. #found .. " 个静态关卡文件:\n\n"
+        for i, f in ipairs(found) do
+            msg = msg .. "  " .. i .. ". " .. f .. "\n\n"
+        end
+    end
+
+    if assetsInfoLabel_ then
+        assetsInfoLabel_:SetText(msg)
+    end
+    if assetsInfoOverlay_ then assetsInfoOverlay_:SetVisible(true) end
 end
 
 --- 获取文件大小（不存在或无法打开返回 0）
@@ -891,6 +977,8 @@ function LevelEditorUI.Exit()
     deleteListPanel_ = nil
     assetPickerOverlay_ = nil
     assetListPanel_ = nil
+    assetsInfoOverlay_ = nil
+    assetsInfoLabel_ = nil
 end
 
 -- ============================================================================
@@ -1741,6 +1829,14 @@ function LevelEditorUI.BuildUI()
                 onClick = function(self) ExportLevelToFile() end,
             },
             UI.Button {
+                text = "📦 存档", variant = "outline", height = 34,
+                onClick = function(self) SaveAsStaticLevel() end,
+            },
+            UI.Button {
+                text = "🔍 查找", variant = "outline", height = 34,
+                onClick = function(self) ShowAssetsFileList() end,
+            },
+            UI.Button {
                 text = "← 返回", variant = "ghost", height = 34,
                 onClick = function(self)
                     if dirty_ then
@@ -2036,6 +2132,58 @@ function LevelEditorUI.BuildUI()
 
 
 
+    -- === 静态文件信息弹窗 ===
+    assetsInfoLabel_ = UI.Label {
+        text = "",
+        fontSize = 13,
+        fontColor = { 220, 230, 240, 240 },
+        width = "100%",
+        textAlign = "left",
+        flexShrink = 1,
+    }
+
+    assetsInfoOverlay_ = UI.Panel {
+        position = "absolute",
+        width = "100%", height = "100%",
+        justifyContent = "center", alignItems = "center",
+        backgroundColor = { 0, 0, 0, 160 },
+        visible = false,
+        onClick = function(self) HideAssetsInfoDialog() end,
+        children = {
+            UI.Panel {
+                width = 420, maxHeight = 500,
+                justifyContent = "flex-start", alignItems = "center",
+                gap = 12,
+                paddingTop = 16, paddingBottom = 16,
+                paddingLeft = 20, paddingRight = 20,
+                backgroundColor = { 35, 38, 55, 250 },
+                borderRadius = 12,
+                borderWidth = 1,
+                borderColor = { 80, 90, 120, 200 },
+                onClick = function(self) end,
+                children = {
+                    UI.Label {
+                        text = "静态关卡文件",
+                        fontSize = 15, fontWeight = "bold",
+                        fontColor = { 255, 255, 255, 240 },
+                    },
+                    UI.Panel {
+                        width = "100%", maxHeight = 320,
+                        overflow = "scroll",
+                        paddingTop = 4, paddingBottom = 4,
+                        children = {
+                            assetsInfoLabel_,
+                        },
+                    },
+                    UI.Button {
+                        text = "确定", variant = "primary", height = 34,
+                        onClick = function(self) HideAssetsInfoDialog() end,
+                    },
+                },
+            },
+        },
+    }
+
     -- === 退出确认弹框 ===
     exitConfirmOverlay_ = UI.Panel {
         position = "absolute",
@@ -2111,6 +2259,7 @@ function LevelEditorUI.BuildUI()
             loadOverlay_,
             deleteOverlay_,
             assetPickerOverlay_,
+            assetsInfoOverlay_,
             exitConfirmOverlay_,
         },
     }

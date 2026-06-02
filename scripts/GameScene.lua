@@ -994,7 +994,14 @@ function GameScene_HandleUpdate(eventType, eventData)
                 -- 编辑器测试模式：胜负后都返回编辑器
                 SceneManager.SwitchTo(SceneManager.SCENE_EDITOR, { fromTest = true })
             elseif gameState_ == STATE_WIN then
-                SceneManager.SwitchTo(SceneManager.SCENE_LEVEL_SELECT)
+                -- 顺序推进：如果有下一关，自动进入；否则返回关卡选择
+                local nextLevel = currentLevel_ + 1
+                if nextLevel <= LevelData.GetLevelCount() then
+                    GameScene.Exit()
+                    GameScene.Enter({ level = nextLevel })
+                else
+                    SceneManager.SwitchTo(SceneManager.SCENE_LEVEL_SELECT)
+                end
             else
                 -- 重试当前关卡
                 GameScene.Exit()
@@ -1805,7 +1812,9 @@ function GameScene.DrawGameState()
         nvgTextOutlined(nvg_, screenW_ / 2, screenH_ / 2 - 20, "通关成功!", {255, 215, 0, 255}, 2.5)
 
         nvgFontSize(nvg_, 18)
-        nvgTextOutlined(nvg_, screenW_ / 2, screenH_ / 2 + 30, "即将返回关卡选择...", {255, 255, 255, 200})
+        local isLastLevel = (currentLevel_ >= LevelData.GetLevelCount())
+        local hintText = isLastLevel and "全部通关！即将返回关卡选择..." or "即将进入下一关..."
+        nvgTextOutlined(nvg_, screenW_ / 2, screenH_ / 2 + 30, hintText, {255, 255, 255, 200})
     else
         nvgFontSize(nvg_, 48)
         nvgTextOutlined(nvg_, screenW_ / 2, screenH_ / 2 - 20, "挑战失败", {255, 80, 80, 255}, 2.5)

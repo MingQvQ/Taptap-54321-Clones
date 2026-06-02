@@ -42,9 +42,9 @@ function Progress.Save()
 end
 
 --- 获取当前解锁的最高关卡编号
---- 当前为开放测试模式：所有关卡解锁
 function Progress.GetUnlockedLevel()
-    return 99  -- 开放测试：全部关卡可用
+    local d = Progress.Load()
+    return d.unlockedLevel or 1
 end
 
 --- 通关某一关后调用：解锁下一关

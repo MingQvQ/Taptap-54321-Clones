@@ -1,18 +1,30 @@
+# 构建产物
 .build/
 dist/
-.tmp/
-.project/
-.emmylua/
-.claude/
-.agent/
-.cli/
+
+# 引擎内部（只读，不需要上传）
 engine-docs/
 examples/
 templates/
 urhox-libs/
 schemas/
-prompts/
+.emmylua/
 tools/
+
+# AI/编辑器配置
+.agent/
+.claude/
+.cli/
+.cursor/
+.codex/
+.gemini/
+
+# 项目运行时配置
+.project/
+
+# 临时文件
+.tmp/
 logs/
-node_modules/
+
+# Meta 文件（引擎生成）
 *.meta
